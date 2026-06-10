@@ -225,7 +225,13 @@ def add_sector_relative_features(
     for ticker, df in feature_frames.items():
         sector = sectors.get(ticker, "不明")
         enriched = df.copy()
-        enriched = enriched.drop(columns=SECTOR_FEATURE_COLUMNS, errors="ignore")
+        sector_like_columns = [
+            column for column in enriched.columns
+            if column in SECTOR_FEATURE_COLUMNS
+            or column.startswith("sector_return_")
+            or column.startswith("sector_relative_strength_")
+        ]
+        enriched = enriched.drop(columns=sector_like_columns, errors="ignore")
         enriched["sector"] = sector
         enriched = enriched.merge(sector_returns, on=["date", "sector"], how="left")
         enriched["sector_return_5d"] = enriched["sector_return_5d"].fillna(sector_default_value())
