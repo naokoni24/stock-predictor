@@ -36,14 +36,14 @@ def load_ml_model():
         return None
 
 
-def predict_ml(model_bundle, hist) -> tuple[str | None, float | None]:
+def predict_ml(model_bundle, hist, nikkei) -> tuple[str | None, float | None]:
     """株価履歴からML予測(ml_signal/ml_score)を計算"""
     if model_bundle is None:
         return None, None
 
     from train_model import build_features
 
-    df = build_features(hist)
+    df = build_features(hist, nikkei)
     row = df.iloc[-1]
 
     if row[model_bundle["features"]].isna().any():
@@ -226,6 +226,10 @@ def main():
     key = os.environ["SUPABASE_SERVICE_KEY"]
     sb = create_client(url, key)
     model_bundle = load_ml_model()
+    nikkei = None
+    if model_bundle is not None:
+        from train_model import get_nikkei_returns
+        nikkei = get_nikkei_returns()
 
     # 主力銘柄 + スクリーニング結果(値上がり/値下がり上位)を結合
     all_tickers = dict(TICKERS)
@@ -279,7 +283,7 @@ def main():
         # 最新日のシグナルを保存
         latest = hist.iloc[-1]
         signal, score = make_signal(latest)
-        ml_signal, ml_score = predict_ml(model_bundle, hist)
+        ml_signal, ml_score = predict_ml(model_bundle, hist, nikkei)
         sb.table("signals").upsert(
             {
                 "ticker": ticker,

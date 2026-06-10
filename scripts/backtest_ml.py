@@ -13,7 +13,7 @@ import pandas as pd
 import yfinance as yf
 
 from fetch_and_signal import TICKERS, calc_rsi, calc_macd, calc_bollinger
-from train_model import build_features, FEATURE_COLUMNS, MODEL_PATH
+from train_model import build_features, get_nikkei_returns, FEATURE_COLUMNS, MODEL_PATH
 
 ML_BUY_THRESHOLD = 0.55
 HOLD_DAYS = 5
@@ -90,6 +90,7 @@ def simulate_ml(
     hist: pd.DataFrame,
     model,
     features: list[str],
+    nikkei: pd.DataFrame,
     require_rule_buy: bool = False,
     threshold: float = ML_BUY_THRESHOLD,
 ) -> list[float]:
@@ -98,7 +99,7 @@ def simulate_ml(
     require_rule_buy=Trueの場合、ルールベースもbuy_candidateの日のみ購入対象とする
     (両シグナル一致フィルタ)
     """
-    df = build_features(hist)
+    df = build_features(hist, nikkei)
     valid = df.dropna(subset=features)
     if valid.empty:
         return []
@@ -145,6 +146,7 @@ def main():
     print(f"{len(histories)}銘柄のデータを取得しました\n")
 
     bundle = joblib.load(MODEL_PATH)
+    nikkei = get_nikkei_returns()
     model, features = bundle["model"], bundle["features"]
 
     rule_returns = []
@@ -152,8 +154,8 @@ def main():
     consensus_returns = []
     for hist in histories.values():
         rule_returns.extend(simulate_rule(hist))
-        ml_returns.extend(simulate_ml(hist, model, features))
-        consensus_returns.extend(simulate_ml(hist, model, features, require_rule_buy=True))
+        ml_returns.extend(simulate_ml(hist, model, features, nikkei))
+        consensus_returns.extend(simulate_ml(hist, model, features, nikkei, require_rule_buy=True))
 
     print("ルールベース (RSI買い<60, 売り>75):")
     print(evaluate(rule_returns))
@@ -169,7 +171,7 @@ def main():
     for threshold in [0.45, 0.5, 0.55, 0.6, 0.65, 0.7]:
         returns = []
         for hist in histories.values():
-            returns.extend(simulate_ml(hist, model, features, threshold=threshold))
+            returns.extend(simulate_ml(hist, model, features, nikkei, threshold=threshold))
         result = evaluate(returns)
         print(
             f"{threshold:>10} {result['trades']:>7} "
