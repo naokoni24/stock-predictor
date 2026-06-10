@@ -37,17 +37,26 @@ async function fetchTab(signalType: "buy_candidate" | "sell_candidate") {
     .select("ticker, date, close, rsi14, signal, score, ml_signal, ml_score, stocks(name, sector)")
     .eq("signal", signalType)
     .order("date", { ascending: false })
-    .order("score", { ascending: signalType === "sell_candidate" })
-    .limit(10);
+    .order("score", { ascending: signalType === "sell_candidate" });
 
-  const rows: Row[] = (signals ?? []).map((s) => {
-    const stock = Array.isArray(s.stocks) ? s.stocks[0] : s.stocks;
-    return {
-      ...s,
-      stockName: stock?.name,
-      sector: stock?.sector,
-    };
-  });
+  // 銘柄ごとに最新日のシグナルのみを残す
+  const latestByTicker = new Map<string, NonNullable<typeof signals>[number]>();
+  for (const s of signals ?? []) {
+    if (!latestByTicker.has(s.ticker)) {
+      latestByTicker.set(s.ticker, s);
+    }
+  }
+
+  const rows: Row[] = Array.from(latestByTicker.values())
+    .slice(0, 10)
+    .map((s) => {
+      const stock = Array.isArray(s.stocks) ? s.stocks[0] : s.stocks;
+      return {
+        ...s,
+        stockName: stock?.name,
+        sector: stock?.sector,
+      };
+    });
 
   const tickers = rows.map((r) => r.ticker);
   if (tickers.length) {
