@@ -1,7 +1,7 @@
 """
 毎朝実行するバッチ:
 1. 対象銘柄の株価をyfinanceで取得
-2. テクニカル指標(SMA25/75, RSI14)を計算
+2. テクニカル指標(SMA25/75, RSI14, MACD, ボリンジャーバンド)を計算
 3. シグナル(おすすめ/売り時候補)を判定
 4. Supabaseに保存
 
@@ -35,13 +35,36 @@ def calc_rsi(close: pd.Series, period: int = 14) -> pd.Series:
     return 100 - (100 / (1 + rs))
 
 
+def calc_macd(close: pd.Series) -> tuple[pd.Series, pd.Series]:
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
+    macd = ema12 - ema26
+    macd_signal = macd.ewm(span=9, adjust=False).mean()
+    return macd, macd_signal
+
+
+def calc_bollinger(close: pd.Series, period: int = 20, num_std: float = 2.0) -> tuple[pd.Series, pd.Series]:
+    sma = close.rolling(period).mean()
+    std = close.rolling(period).std()
+    return sma + num_std * std, sma - num_std * std
+
+
 def make_signal(row) -> tuple[str | None, float]:
     """ルールベースでシグナルとスコアを決定"""
-    if pd.isna(row["sma25"]) or pd.isna(row["sma75"]) or pd.isna(row["rsi14"]):
+    if (
+        pd.isna(row["sma25"])
+        or pd.isna(row["sma75"])
+        or pd.isna(row["rsi14"])
+        or pd.isna(row["macd"])
+        or pd.isna(row["macd_signal"])
+        or pd.isna(row["bb_upper"])
+        or pd.isna(row["bb_lower"])
+    ):
         return None, 0.0
 
     score = 0.0
     signal = "hold"
+    macd_diff = row["macd"] - row["macd_signal"]
 
     # ゴールデンクロス気味（短期線が長期線の上）+ RSIが過熱でない -> 買い候補
     if row["sma25"] > row["sma75"] and row["rsi14"] < 70:
@@ -49,8 +72,24 @@ def make_signal(row) -> tuple[str | None, float]:
         score += (row["sma25"] / row["sma75"] - 1) * 100
         score += max(0, 50 - row["rsi14"]) * 0.1
 
-    # デッドクロス気味、またはRSI過熱 -> 売り候補
-    if row["sma25"] < row["sma75"] or row["rsi14"] > 70:
+        # MACDがシグナルを上回っている(上昇モメンタム)ほど加点
+        if macd_diff > 0:
+            score += macd_diff * 2
+
+        # ボリンジャーバンド下限近くは押し目買いとして加点
+        bb_width = row["bb_upper"] - row["bb_lower"]
+        if bb_width > 0:
+            position = (row["Close"] - row["bb_lower"]) / bb_width
+            if position < 0.3:
+                score += (0.3 - position) * 10
+
+    # デッドクロス気味、RSI過熱、MACDデッドクロス、バンド上限超え -> 売り候補
+    if (
+        row["sma25"] < row["sma75"]
+        or row["rsi14"] > 70
+        or macd_diff < 0
+        or row["Close"] > row["bb_upper"]
+    ):
         signal = "sell_candidate"
 
     return signal, round(score, 4)
@@ -80,6 +119,8 @@ def main():
         hist["sma25"] = hist["Close"].rolling(25).mean()
         hist["sma75"] = hist["Close"].rolling(75).mean()
         hist["rsi14"] = calc_rsi(hist["Close"], 14)
+        hist["macd"], hist["macd_signal"] = calc_macd(hist["Close"])
+        hist["bb_upper"], hist["bb_lower"] = calc_bollinger(hist["Close"])
 
         # 価格履歴を保存
         price_rows = [
@@ -107,6 +148,10 @@ def main():
                 "sma25": None if pd.isna(latest["sma25"]) else float(latest["sma25"]),
                 "sma75": None if pd.isna(latest["sma75"]) else float(latest["sma75"]),
                 "rsi14": None if pd.isna(latest["rsi14"]) else float(latest["rsi14"]),
+                "macd": None if pd.isna(latest["macd"]) else float(latest["macd"]),
+                "macd_signal": None if pd.isna(latest["macd_signal"]) else float(latest["macd_signal"]),
+                "bb_upper": None if pd.isna(latest["bb_upper"]) else float(latest["bb_upper"]),
+                "bb_lower": None if pd.isna(latest["bb_lower"]) else float(latest["bb_lower"]),
                 "signal": signal,
                 "score": score,
             }

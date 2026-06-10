@@ -24,6 +24,10 @@ create table if not exists signals (
   sma25 numeric,
   sma75 numeric,
   rsi14 numeric,
+  macd numeric,
+  macd_signal numeric,
+  bb_upper numeric,
+  bb_lower numeric,
   signal text,           -- 'buy_candidate' | 'sell_candidate' | 'hold' | null
   score numeric,         -- おすすめ度ランキング用スコア
   primary key (ticker, date)
