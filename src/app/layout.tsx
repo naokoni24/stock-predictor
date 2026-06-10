@@ -33,6 +33,7 @@ export default function RootLayout({
           <nav className="max-w-3xl mx-auto flex gap-6 px-4 py-3 text-sm font-medium">
             <Link href="/">本日のおすすめ</Link>
             <Link href="/holdings">保有株</Link>
+            <Link href="/stocks">登録銘柄一覧</Link>
           </nav>
         </header>
         <main className="flex-1 max-w-3xl mx-auto w-full px-4 py-6">
