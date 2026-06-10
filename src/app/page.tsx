@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { supabase } from "@/lib/supabase";
 
 const SIGNAL_LABEL: Record<string, string> = {
@@ -12,13 +13,20 @@ const SIGNAL_COLOR: Record<string, string> = {
   hold: "bg-zinc-100 text-zinc-700",
 };
 
-export default async function Home() {
+export default async function Home({
+  searchParams,
+}: {
+  searchParams: Promise<{ tab?: string }>;
+}) {
+  const { tab } = await searchParams;
+  const signalType = tab === "sell" ? "sell_candidate" : "buy_candidate";
+
   const { data: signals, error } = await supabase
     .from("signals")
     .select("ticker, date, close, rsi14, signal, score, stocks(name)")
-    .eq("signal", "buy_candidate")
+    .eq("signal", signalType)
     .order("date", { ascending: false })
-    .order("score", { ascending: false })
+    .order("score", { ascending: signalType === "sell_candidate" })
     .limit(10);
 
   const rows = (signals ?? []).map((s) => ({
@@ -26,9 +34,28 @@ export default async function Home() {
     stockName: Array.isArray(s.stocks) ? s.stocks[0]?.name : s.stocks?.name,
   }));
 
+  const tabClass = (active: boolean) =>
+    `px-4 py-2 text-sm font-medium border-b-2 ${
+      active
+        ? "border-zinc-900 text-zinc-900"
+        : "border-transparent text-zinc-400 hover:text-zinc-600"
+    }`;
+
   return (
     <div className="flex flex-col gap-4">
       <h1 className="text-xl font-bold">本日のおすすめ</h1>
+
+      <div className="flex border-b">
+        <Link href="/" className={tabClass(signalType === "buy_candidate")}>
+          買い候補
+        </Link>
+        <Link
+          href="/?tab=sell"
+          className={tabClass(signalType === "sell_candidate")}
+        >
+          売り候補
+        </Link>
+      </div>
 
       {error && (
         <p className="text-red-600 text-sm">
@@ -38,7 +65,7 @@ export default async function Home() {
 
       {!error && (!signals || signals.length === 0) && (
         <p className="text-zinc-500 text-sm">
-          まだデータがありません。スクリプトを実行してシグナルを生成してください。
+          該当する銘柄がありません。
         </p>
       )}
 
