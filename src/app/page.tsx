@@ -16,6 +16,7 @@ export default async function Home() {
   const { data: signals, error } = await supabase
     .from("signals")
     .select("ticker, date, close, rsi14, signal, score, stocks(name)")
+    .eq("signal", "buy_candidate")
     .order("date", { ascending: false })
     .order("score", { ascending: false })
     .limit(10);
