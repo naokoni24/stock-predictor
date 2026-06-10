@@ -1,4 +1,6 @@
 import { supabase } from "@/lib/supabase";
+import HoldingsForm from "./HoldingsForm";
+import DeleteHoldingButton from "./DeleteHoldingButton";
 
 export default async function HoldingsPage() {
   const { data: holdings, error } = await supabase
@@ -45,6 +47,8 @@ export default async function HoldingsPage() {
     <div className="flex flex-col gap-4">
       <h1 className="text-xl font-bold">保有株一覧</h1>
 
+      <HoldingsForm />
+
       {error && (
         <p className="text-red-600 text-sm">
           データ取得エラー: {error.message}
@@ -88,11 +92,14 @@ export default async function HoldingsPage() {
                 )}
               </p>
             </div>
-            {h.signal === "sell_candidate" && (
-              <span className="text-xs font-semibold px-2 py-1 rounded-full bg-red-100 text-red-800">
-                売り時候補
-              </span>
-            )}
+            <div className="flex items-center gap-3">
+              {h.signal === "sell_candidate" && (
+                <span className="text-xs font-semibold px-2 py-1 rounded-full bg-red-100 text-red-800">
+                  売り時候補
+                </span>
+              )}
+              <DeleteHoldingButton id={h.id} />
+            </div>
           </div>
         ))}
       </div>
