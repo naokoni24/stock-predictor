@@ -15,10 +15,54 @@
 
 import os
 import datetime
+import joblib
 import pandas as pd
 import yfinance as yf
 from yfinance.screener.query import EquityQuery
 from supabase import create_client
+
+MODEL_PATH = os.path.join(os.path.dirname(__file__), "model.pkl")
+
+
+def load_ml_model():
+    """学習済みモデルを読み込む。存在しない場合はNoneを返す(ML推論をスキップ)"""
+    try:
+        return joblib.load(MODEL_PATH)
+    except FileNotFoundError:
+        print("model.pkl not found, skip ML prediction")
+        return None
+
+
+def predict_ml(model_bundle, row) -> tuple[str | None, float | None]:
+    """テクニカル指標からML予測(ml_signal/ml_score)を計算"""
+    if model_bundle is None:
+        return None, None
+
+    if (
+        pd.isna(row["sma25"])
+        or pd.isna(row["sma75"])
+        or pd.isna(row["rsi14"])
+        or pd.isna(row["macd"])
+        or pd.isna(row["macd_signal"])
+        or pd.isna(row["bb_upper"])
+        or pd.isna(row["bb_lower"])
+    ):
+        return None, None
+
+    bb_width = row["bb_upper"] - row["bb_lower"]
+    features = pd.DataFrame([{
+        "sma25_ratio": row["Close"] / row["sma25"] - 1,
+        "sma75_ratio": row["Close"] / row["sma75"] - 1,
+        "rsi14": row["rsi14"],
+        "macd": row["macd"],
+        "macd_signal": row["macd_signal"],
+        "macd_diff": row["macd"] - row["macd_signal"],
+        "bb_position": (row["Close"] - row["bb_lower"]) / bb_width if bb_width else 0.0,
+    }])[model_bundle["features"]]
+
+    score = float(model_bundle["model"].predict_proba(features)[0, 1])
+    signal = "buy_candidate" if score >= 0.5 else "hold"
+    return signal, round(score, 4)
 
 # 対象銘柄(ティッカー: 名称)。必要に応じて追加・holdingsテーブルと連動させる
 TICKERS = {
@@ -190,6 +234,7 @@ def main():
     url = os.environ["SUPABASE_URL"]
     key = os.environ["SUPABASE_SERVICE_KEY"]
     sb = create_client(url, key)
+    model_bundle = load_ml_model()
 
     # 主力銘柄 + スクリーニング結果(値上がり/値下がり上位)を結合
     all_tickers = dict(TICKERS)
@@ -243,6 +288,7 @@ def main():
         # 最新日のシグナルを保存
         latest = hist.iloc[-1]
         signal, score = make_signal(latest)
+        ml_signal, ml_score = predict_ml(model_bundle, latest)
         sb.table("signals").upsert(
             {
                 "ticker": ticker,
@@ -257,10 +303,12 @@ def main():
                 "bb_lower": None if pd.isna(latest["bb_lower"]) else float(latest["bb_lower"]),
                 "signal": signal,
                 "score": score,
+                "ml_signal": ml_signal,
+                "ml_score": ml_score,
             }
         ).execute()
 
-        print(f"{ticker}: signal={signal} score={score}")
+        print(f"{ticker}: signal={signal} score={score} ml_signal={ml_signal} ml_score={ml_score}")
 
 
 if __name__ == "__main__":

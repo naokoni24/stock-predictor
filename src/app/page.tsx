@@ -23,7 +23,7 @@ export default async function Home({
 
   const { data: signals, error } = await supabase
     .from("signals")
-    .select("ticker, date, close, rsi14, signal, score, stocks(name, sector)")
+    .select("ticker, date, close, rsi14, signal, score, ml_signal, ml_score, stocks(name, sector)")
     .eq("signal", signalType)
     .order("date", { ascending: false })
     .order("score", { ascending: signalType === "sell_candidate" })
@@ -88,15 +88,23 @@ export default async function Home({
               <p className="text-sm text-zinc-500">
                 終値 {s.close?.toLocaleString()} 円 / RSI {s.rsi14?.toFixed(1)}
                 {s.sector && ` / ${s.sector}`}
+                {s.ml_score != null && ` / AI上昇期待度 ${(s.ml_score * 100).toFixed(0)}%`}
               </p>
             </div>
-            <span
-              className={`text-xs font-semibold px-2 py-1 rounded-full ${
-                SIGNAL_COLOR[s.signal ?? ""] ?? "bg-zinc-100 text-zinc-700"
-              }`}
-            >
-              {SIGNAL_LABEL[s.signal ?? ""] ?? "ー"}
-            </span>
+            <div className="flex flex-col items-end gap-1">
+              <span
+                className={`text-xs font-semibold px-2 py-1 rounded-full ${
+                  SIGNAL_COLOR[s.signal ?? ""] ?? "bg-zinc-100 text-zinc-700"
+                }`}
+              >
+                {SIGNAL_LABEL[s.signal ?? ""] ?? "ー"}
+              </span>
+              {s.ml_signal === "buy_candidate" && (
+                <span className="text-xs font-semibold px-2 py-1 rounded-full bg-blue-100 text-blue-800">
+                  AI買い候補
+                </span>
+              )}
+            </div>
           </Link>
         ))}
       </div>
