@@ -33,7 +33,7 @@ export default function PriceChart({ data }: { data: PricePoint[] }) {
             width={60}
           />
           <Tooltip
-            formatter={(value: number) => `${value.toLocaleString()} 円`}
+            formatter={(value) => `${Number(value).toLocaleString()} 円`}
           />
           <Line
             type="monotone"
