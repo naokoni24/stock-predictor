@@ -1,9 +1,13 @@
 """
 毎朝実行するバッチ:
-1. 対象銘柄の株価をyfinanceで取得
-2. テクニカル指標(SMA25/75, RSI14, MACD, ボリンジャーバンド)を計算
-3. シグナル(おすすめ/売り時候補)を判定
-4. Supabaseに保存
+1. 主力銘柄(TICKERS) + Yahooファイナンスのスクリーニング結果(値上がり率/出来高 上位、日本株)を対象に
+2. 株価をyfinanceで取得
+3. テクニカル指標(SMA25/75, RSI14, MACD, ボリンジャーバンド)を計算
+4. シグナル(おすすめ/売り時候補)を判定
+5. Supabaseに保存
+
+スクリーニングを使うことで、中小型株も含めて毎日対象が動的に変わる。
+取得銘柄数は数十〜100程度に抑え、無料枠の範囲で運用できるようにしている。
 
 実行: python scripts/fetch_and_signal.py
 必要な環境変数: SUPABASE_URL, SUPABASE_SERVICE_KEY
@@ -13,6 +17,7 @@ import os
 import datetime
 import pandas as pd
 import yfinance as yf
+from yfinance.screener.query import EquityQuery
 from supabase import create_client
 
 # 対象銘柄(ティッカー: 名称)。必要に応じて追加・holdingsテーブルと連動させる
@@ -62,6 +67,33 @@ def calc_bollinger(close: pd.Series, period: int = 20, num_std: float = 2.0) -> 
     sma = close.rolling(period).mean()
     std = close.rolling(period).std()
     return sma + num_std * std, sma - num_std * std
+
+
+def get_screener_tickers(size: int = 25) -> dict[str, str]:
+    """Yahooファイナンスのスクリーニング(値上がり率/出来高 上位、日本株)から銘柄を取得"""
+    queries = {
+        "gainers": EquityQuery(
+            "and", [EquityQuery("eq", ["region", "jp"]), EquityQuery("gt", ["intradaypricechange", 0])]
+        ),
+        "losers": EquityQuery(
+            "and", [EquityQuery("eq", ["region", "jp"]), EquityQuery("lt", ["intradaypricechange", 0])]
+        ),
+    }
+
+    result: dict[str, str] = {}
+    for name, query in queries.items():
+        try:
+            sort_field = "percentchange"
+            res = yf.screen(query, sortField=sort_field, sortAsc=(name == "losers"), size=size)
+            for item in res.get("quotes", []):
+                symbol = item.get("symbol")
+                if not symbol:
+                    continue
+                result[symbol] = item.get("shortName") or item.get("longName") or symbol
+        except Exception as e:
+            print(f"screener {name} failed: {e}")
+
+    return result
 
 
 def make_signal(row) -> tuple[str | None, float]:
@@ -115,14 +147,21 @@ def main():
     key = os.environ["SUPABASE_SERVICE_KEY"]
     sb = create_client(url, key)
 
+    # 主力銘柄 + スクリーニング結果(値上がり/値下がり上位)を結合
+    all_tickers = dict(TICKERS)
+    screener_tickers = get_screener_tickers()
+    print(f"screener found {len(screener_tickers)} tickers")
+    for t, n in screener_tickers.items():
+        all_tickers.setdefault(t, n)
+
     # 銘柄マスタをupsert
     sb.table("stocks").upsert(
-        [{"ticker": t, "name": n} for t, n in TICKERS.items()]
+        [{"ticker": t, "name": n} for t, n in all_tickers.items()]
     ).execute()
 
     today = datetime.date.today()
 
-    for ticker in TICKERS:
+    for ticker in all_tickers:
         hist = yf.Ticker(ticker).history(period="6mo")
         if hist.empty:
             print(f"skip {ticker}: no data")
