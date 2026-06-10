@@ -69,6 +69,22 @@ def calc_bollinger(close: pd.Series, period: int = 20, num_std: float = 2.0) -> 
     return sma + num_std * std, sma - num_std * std
 
 
+JPX_LIST_URL = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls"
+
+
+def get_jp_name_map() -> dict[str, str]:
+    """JPX上場銘柄一覧から証券コード→日本語銘柄名のマップを取得"""
+    try:
+        df = pd.read_excel(JPX_LIST_URL)
+        return {
+            f"{str(row['コード']).strip()}.T": str(row['銘柄名']).strip()
+            for _, row in df.iterrows()
+        }
+    except Exception as e:
+        print(f"failed to load JPX list: {e}")
+        return {}
+
+
 def get_screener_tickers(size: int = 25) -> dict[str, str]:
     """Yahooファイナンスのスクリーニング(値上がり率/出来高 上位、日本株)から銘柄を取得"""
     queries = {
@@ -151,8 +167,9 @@ def main():
     all_tickers = dict(TICKERS)
     screener_tickers = get_screener_tickers()
     print(f"screener found {len(screener_tickers)} tickers")
+    jp_names = get_jp_name_map()
     for t, n in screener_tickers.items():
-        all_tickers.setdefault(t, n)
+        all_tickers.setdefault(t, jp_names.get(t, n))
 
     # 銘柄マスタをupsert
     sb.table("stocks").upsert(
