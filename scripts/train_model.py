@@ -74,6 +74,8 @@ def build_features(hist: pd.DataFrame, nikkei: pd.DataFrame | None = None) -> pd
     if nikkei is not None:
         df["date"] = pd.to_datetime(df["Date"]).dt.date
         df = df.merge(nikkei, on="date", how="left")
+        # 日経平均は休場日のずれで最新日が欠けることがあるため、直前値で埋める
+        df["nikkei_return_5d"] = df["nikkei_return_5d"].ffill()
         df["relative_strength_5d"] = df["return_5d"] - df["nikkei_return_5d"]
     else:
         df["relative_strength_5d"] = df["return_5d"]
