@@ -42,7 +42,7 @@ export default async function StockDetail({
         </Link>
         <h1 className="text-xl font-bold mt-1">
           {stock?.name ?? ticker}{" "}
-          <span className="text-zinc-400 text-sm">{ticker}</span>
+          <span className="text-zinc-500 text-sm">{ticker}</span>
         </h1>
         {stock?.sector && (
           <p className="text-sm text-zinc-500">{stock.sector}</p>
@@ -50,7 +50,7 @@ export default async function StockDetail({
       </div>
 
       {error && (
-        <p className="text-red-600 text-sm">
+        <p className="text-red-400 text-sm">
           データ取得エラー: {error.message}
         </p>
       )}
@@ -62,7 +62,7 @@ export default async function StockDetail({
       {prices && prices.length > 0 && <PriceChart data={prices} />}
 
       {signal && (
-        <div className="rounded-lg border bg-white p-4 text-sm grid grid-cols-2 gap-y-2 gap-x-4">
+        <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-4 text-sm grid grid-cols-2 gap-y-2 gap-x-4">
           <span className="text-zinc-500">シグナル</span>
           <span className="font-semibold">
             {SIGNAL_LABEL[signal.signal ?? ""] ?? "ー"}（スコア {signal.score}）

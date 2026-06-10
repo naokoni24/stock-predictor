@@ -24,7 +24,7 @@ export default function DeleteHoldingButton({ id }: { id: number }) {
     <button
       onClick={handleDelete}
       disabled={loading}
-      className="text-xs text-zinc-400 hover:text-red-600 disabled:opacity-50"
+      className="text-xs text-zinc-500 hover:text-red-400 disabled:opacity-50"
     >
       削除
     </button>

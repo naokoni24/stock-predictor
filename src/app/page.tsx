@@ -8,9 +8,9 @@ const SIGNAL_LABEL: Record<string, string> = {
 };
 
 const SIGNAL_COLOR: Record<string, string> = {
-  buy_candidate: "bg-green-100 text-green-800",
-  sell_candidate: "bg-red-100 text-red-800",
-  hold: "bg-zinc-100 text-zinc-700",
+  buy_candidate: "bg-green-900/40 text-green-400",
+  sell_candidate: "bg-red-900/40 text-red-400",
+  hold: "bg-zinc-800 text-zinc-300",
 };
 
 export default async function Home({
@@ -41,8 +41,8 @@ export default async function Home({
   const tabClass = (active: boolean) =>
     `px-4 py-2 text-sm font-medium border-b-2 ${
       active
-        ? "border-zinc-900 text-zinc-900"
-        : "border-transparent text-zinc-400 hover:text-zinc-600"
+        ? "border-zinc-900 text-zinc-100"
+        : "border-transparent text-zinc-500 hover:text-zinc-200"
     }`;
 
   return (
@@ -62,7 +62,7 @@ export default async function Home({
       </div>
 
       {error && (
-        <p className="text-red-600 text-sm">
+        <p className="text-red-400 text-sm">
           データ取得エラー: {error.message}
         </p>
       )}
@@ -78,12 +78,12 @@ export default async function Home({
           <Link
             key={s.ticker}
             href={`/stock/${s.ticker}`}
-            className="flex items-center justify-between rounded-lg border bg-white px-4 py-3 hover:bg-zinc-50"
+            className="flex items-center justify-between rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3 hover:bg-zinc-950"
           >
             <div>
               <p className="font-semibold">
                 {s.stockName ?? s.ticker}{" "}
-                <span className="text-zinc-400 text-xs">{s.ticker}</span>
+                <span className="text-zinc-500 text-xs">{s.ticker}</span>
               </p>
               <p className="text-sm text-zinc-500">
                 終値 {s.close?.toLocaleString()} 円 / RSI {s.rsi14?.toFixed(1)}
@@ -94,13 +94,13 @@ export default async function Home({
             <div className="flex flex-col items-end gap-1">
               <span
                 className={`text-xs font-semibold px-2 py-1 rounded-full ${
-                  SIGNAL_COLOR[s.signal ?? ""] ?? "bg-zinc-100 text-zinc-700"
+                  SIGNAL_COLOR[s.signal ?? ""] ?? "bg-zinc-800 text-zinc-300"
                 }`}
               >
                 {SIGNAL_LABEL[s.signal ?? ""] ?? "ー"}
               </span>
               {s.ml_signal === "buy_candidate" && (
-                <span className="text-xs font-semibold px-2 py-1 rounded-full bg-blue-100 text-blue-800">
+                <span className="text-xs font-semibold px-2 py-1 rounded-full bg-blue-900/40 text-blue-400">
                   AI買い候補
                 </span>
               )}

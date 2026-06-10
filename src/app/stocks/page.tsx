@@ -34,7 +34,7 @@ export default async function StocksPage() {
       <h1 className="text-xl font-bold">登録銘柄一覧</h1>
 
       {error && (
-        <p className="text-red-600 text-sm">
+        <p className="text-red-400 text-sm">
           データ取得エラー: {error.message}
         </p>
       )}

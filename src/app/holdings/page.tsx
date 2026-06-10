@@ -51,7 +51,7 @@ export default async function HoldingsPage() {
       <HoldingsForm />
 
       {error && (
-        <p className="text-red-600 text-sm">
+        <p className="text-red-400 text-sm">
           データ取得エラー: {error.message}
         </p>
       )}
@@ -66,7 +66,7 @@ export default async function HoldingsPage() {
         {rows.map((h) => (
           <div
             key={h.id}
-            className="flex items-center justify-between rounded-lg border bg-white px-4 py-3"
+            className="flex items-center justify-between rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3"
           >
             <div>
               <Link
@@ -74,7 +74,7 @@ export default async function HoldingsPage() {
                 className="font-semibold hover:underline"
               >
                 {h.stockName ?? h.ticker}{" "}
-                <span className="text-zinc-400 text-xs">{h.ticker}</span>
+                <span className="text-zinc-500 text-xs">{h.ticker}</span>
               </Link>
               <p className="text-sm text-zinc-500">
                 {h.shares}株 / 取得単価 {h.cost_price.toLocaleString()}円
@@ -85,8 +85,8 @@ export default async function HoldingsPage() {
                     <span
                       className={
                         (h.profitRate ?? 0) >= 0
-                          ? "text-green-600"
-                          : "text-red-600"
+                          ? "text-green-400"
+                          : "text-red-400"
                       }
                     >
                       {h.profitRate?.toFixed(1)}%
@@ -98,7 +98,7 @@ export default async function HoldingsPage() {
             </div>
             <div className="flex items-center gap-3">
               {h.signal === "sell_candidate" && (
-                <span className="text-xs font-semibold px-2 py-1 rounded-full bg-red-100 text-red-800">
+                <span className="text-xs font-semibold px-2 py-1 rounded-full bg-red-900/40 text-red-400">
                   売り時候補
                 </span>
               )}

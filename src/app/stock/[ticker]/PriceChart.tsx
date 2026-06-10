@@ -17,10 +17,10 @@ type PricePoint = {
 
 export default function PriceChart({ data }: { data: PricePoint[] }) {
   return (
-    <div className="h-64 w-full rounded-lg border bg-white p-2">
+    <div className="h-64 w-full rounded-lg border border-zinc-800 bg-zinc-900 p-2">
       <ResponsiveContainer width="100%" height="100%">
         <LineChart data={data}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#e4e4e7" />
+          <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
           <XAxis
             dataKey="date"
             tick={{ fontSize: 11 }}
@@ -38,7 +38,7 @@ export default function PriceChart({ data }: { data: PricePoint[] }) {
           <Line
             type="monotone"
             dataKey="close"
-            stroke="#18181b"
+            stroke="#71717a"
             strokeWidth={2}
             dot={false}
           />
