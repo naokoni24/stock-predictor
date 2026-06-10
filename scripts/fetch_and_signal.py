@@ -14,7 +14,6 @@
 """
 
 import os
-import datetime
 import joblib
 import pandas as pd
 import yfinance as yf
@@ -252,8 +251,6 @@ def main():
         ]
     ).execute()
 
-    today = datetime.date.today()
-
     for ticker in all_tickers:
         hist = yf.Ticker(ticker).history(period="6mo")
         if hist.empty:
@@ -286,12 +283,13 @@ def main():
 
         # 最新日のシグナルを保存
         latest = hist.iloc[-1]
+        market_date = latest["date"]
         signal, score = make_signal(latest)
         ml_signal, ml_score = predict_ml(model_bundle, hist, nikkei, jp_sectors.get(ticker))
         sb.table("signals").upsert(
             {
                 "ticker": ticker,
-                "date": today.isoformat(),
+                "date": market_date.isoformat(),
                 "close": float(latest["Close"]),
                 "sma25": None if pd.isna(latest["sma25"]) else float(latest["sma25"]),
                 "sma75": None if pd.isna(latest["sma75"]) else float(latest["sma75"]),

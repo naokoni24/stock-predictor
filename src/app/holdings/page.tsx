@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { ArrowDownRight, ArrowUpRight, Wallet } from "lucide-react";
-import { supabase } from "@/lib/supabase";
+import { createClient } from "@/lib/supabase-server";
 import HoldingsForm from "./HoldingsForm";
 import DeleteHoldingButton from "./DeleteHoldingButton";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -21,7 +21,14 @@ function riskLevel(rsi14: number | null, profitRate: number | null) {
   return { label: "低", score, className: "bg-bullish text-bullish-foreground" };
 }
 
-export default async function HoldingsPage() {
+export default async function HoldingsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ error?: string }>;
+}) {
+  const { error: formError } = await searchParams;
+  const supabase = await createClient();
+
   const { data: holdings, error } = await supabase
     .from("holdings")
     .select("id, ticker, shares, cost_price, stocks(name)")
@@ -120,7 +127,7 @@ export default async function HoldingsPage() {
         </div>
       )}
 
-      <HoldingsForm />
+      <HoldingsForm error={formError} />
 
       {error && <p className="text-bearish text-sm">データ取得エラー: {error.message}</p>}
 
