@@ -158,10 +158,38 @@ function EmptyState({ message }: { message: string }) {
   );
 }
 
+async function fetchNews() {
+  const { data, error } = await supabase
+    .from("news")
+    .select("ticker, title, url, source, published_at, sentiment, stocks(name)")
+    .order("published_at", { ascending: false })
+    .limit(6);
+
+  const rows = (data ?? []).map((n) => {
+    const stock = Array.isArray(n.stocks) ? n.stocks[0] : n.stocks;
+    return { ...n, stockName: stock?.name };
+  });
+
+  return { rows, error };
+}
+
+const SENTIMENT_LABEL: Record<string, string> = {
+  positive: "ポジティブ",
+  negative: "ネガティブ",
+  neutral: "中立",
+};
+
+const SENTIMENT_COLOR: Record<string, string> = {
+  positive: "bg-bullish text-bullish-foreground",
+  negative: "bg-bearish text-bearish-foreground",
+  neutral: "bg-secondary text-secondary-foreground",
+};
+
 export default async function Home() {
-  const [buy, sell] = await Promise.all([
+  const [buy, sell, news] = await Promise.all([
     fetchTab("buy_candidate"),
     fetchTab("sell_candidate"),
+    fetchNews(),
   ]);
 
   const topPick = buy.rows[0];
@@ -272,10 +300,37 @@ export default async function Home() {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="flex flex-col items-center justify-center gap-2 py-8 text-center">
-                <p className="text-sm text-muted-foreground">
-                  ニュース・センチメント分析は近日公開予定です。
-                </p>
+              {news.error && (
+                <p className="text-bearish text-sm">データ取得エラー: {news.error.message}</p>
+              )}
+              {!news.error && news.rows.length === 0 && (
+                <div className="flex flex-col items-center justify-center gap-2 py-8 text-center">
+                  <p className="text-sm text-muted-foreground">
+                    ニュースはまだありません。次回の自動更新をお待ちください。
+                  </p>
+                </div>
+              )}
+              <div className="flex flex-col gap-3">
+                {news.rows.map((n) => (
+                  <a
+                    key={n.url}
+                    href={n.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex flex-col gap-1 rounded-lg p-2 -mx-2 transition-colors hover:bg-accent/50"
+                  >
+                    <p className="text-sm font-medium leading-snug line-clamp-2">{n.title}</p>
+                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                      {n.stockName && <span>{n.stockName}</span>}
+                      {n.source && <span>· {n.source}</span>}
+                      {n.sentiment && (
+                        <Badge className={cn("ml-auto", SENTIMENT_COLOR[n.sentiment])}>
+                          {SENTIMENT_LABEL[n.sentiment] ?? n.sentiment}
+                        </Badge>
+                      )}
+                    </div>
+                  </a>
+                ))}
               </div>
             </CardContent>
           </Card>
