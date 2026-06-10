@@ -23,16 +23,20 @@ export default async function Home({
 
   const { data: signals, error } = await supabase
     .from("signals")
-    .select("ticker, date, close, rsi14, signal, score, stocks(name)")
+    .select("ticker, date, close, rsi14, signal, score, stocks(name, sector)")
     .eq("signal", signalType)
     .order("date", { ascending: false })
     .order("score", { ascending: signalType === "sell_candidate" })
     .limit(10);
 
-  const rows = (signals ?? []).map((s) => ({
-    ...s,
-    stockName: Array.isArray(s.stocks) ? s.stocks[0]?.name : s.stocks?.name,
-  }));
+  const rows = (signals ?? []).map((s) => {
+    const stock = Array.isArray(s.stocks) ? s.stocks[0] : s.stocks;
+    return {
+      ...s,
+      stockName: stock?.name,
+      sector: stock?.sector,
+    };
+  });
 
   const tabClass = (active: boolean) =>
     `px-4 py-2 text-sm font-medium border-b-2 ${
@@ -83,6 +87,7 @@ export default async function Home({
               </p>
               <p className="text-sm text-zinc-500">
                 終値 {s.close?.toLocaleString()} 円 / RSI {s.rsi14?.toFixed(1)}
+                {s.sector && ` / ${s.sector}`}
               </p>
             </div>
             <span

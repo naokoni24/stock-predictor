@@ -17,7 +17,7 @@ export default async function StockDetail({
 
   const [{ data: stock }, { data: prices, error }, { data: signal }] =
     await Promise.all([
-      supabase.from("stocks").select("name").eq("ticker", ticker).maybeSingle(),
+      supabase.from("stocks").select("name, sector").eq("ticker", ticker).maybeSingle(),
       supabase
         .from("prices")
         .select("date, close")
@@ -44,6 +44,9 @@ export default async function StockDetail({
           {stock?.name ?? ticker}{" "}
           <span className="text-zinc-400 text-sm">{ticker}</span>
         </h1>
+        {stock?.sector && (
+          <p className="text-sm text-zinc-500">{stock.sector}</p>
+        )}
       </div>
 
       {error && (

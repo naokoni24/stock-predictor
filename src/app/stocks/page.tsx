@@ -16,7 +16,7 @@ const SIGNAL_COLOR: Record<string, string> = {
 export default async function StocksPage() {
   const { data: stocks, error } = await supabase
     .from("stocks")
-    .select("ticker, name")
+    .select("ticker, name, sector")
     .order("ticker");
 
   const tickers = (stocks ?? []).map((s) => s.ticker);
@@ -59,10 +59,15 @@ export default async function StocksPage() {
               href={`/stock/${s.ticker}`}
               className="flex items-center justify-between rounded-lg border bg-white px-4 py-3 hover:bg-zinc-50"
             >
-              <p className="font-semibold">
-                {s.name ?? s.ticker}{" "}
-                <span className="text-zinc-400 text-xs">{s.ticker}</span>
-              </p>
+              <div>
+                <p className="font-semibold">
+                  {s.name ?? s.ticker}{" "}
+                  <span className="text-zinc-400 text-xs">{s.ticker}</span>
+                </p>
+                {s.sector && (
+                  <p className="text-xs text-zinc-500">{s.sector}</p>
+                )}
+              </div>
               {signal && (
                 <span
                   className={`text-xs font-semibold px-2 py-1 rounded-full ${

@@ -101,6 +101,19 @@ def get_jp_name_map() -> dict[str, str]:
         return {}
 
 
+def get_jp_sector_map() -> dict[str, str]:
+    """JPX上場銘柄一覧から証券コード→業種(33業種区分)のマップを取得"""
+    try:
+        df = pd.read_excel(JPX_LIST_URL)
+        return {
+            f"{str(row['コード']).strip()}.T": str(row['33業種区分']).strip()
+            for _, row in df.iterrows()
+        }
+    except Exception as e:
+        print(f"failed to load JPX sector list: {e}")
+        return {}
+
+
 def get_screener_tickers(size: int = 50) -> dict[str, str]:
     """Yahooファイナンスのスクリーニング(値上がり率/出来高 上位、日本株)から銘柄を取得"""
     queries = {
@@ -184,12 +197,16 @@ def main():
     screener_tickers = get_screener_tickers()
     print(f"screener found {len(screener_tickers)} tickers")
     jp_names = get_jp_name_map()
+    jp_sectors = get_jp_sector_map()
     for t, n in screener_tickers.items():
         all_tickers.setdefault(t, jp_names.get(t, n))
 
     # 銘柄マスタをupsert
     sb.table("stocks").upsert(
-        [{"ticker": t, "name": n} for t, n in all_tickers.items()]
+        [
+            {"ticker": t, "name": n, "sector": jp_sectors.get(t)}
+            for t, n in all_tickers.items()
+        ]
     ).execute()
 
     today = datetime.date.today()
