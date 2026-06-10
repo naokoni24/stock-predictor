@@ -24,7 +24,31 @@ from sklearn.metrics import accuracy_score, classification_report
 HORIZON_DAYS = 5
 TARGET_RETURN = 0.02
 
-FEATURE_COLUMNS = [
+MARKET_INDICES = {
+    "nikkei": "^N225",
+    "topix": "^TOPX",
+    "usdjpy": "JPY=X",
+    "nasdaq": "^IXIC",
+    "sox": "^SOX",
+}
+
+MARKET_METRICS = [
+    "return_1d",
+    "return_5d",
+    "return_20d",
+    "sma25_ratio",
+    "sma75_ratio",
+    "rsi14",
+    "volatility_20d",
+]
+
+MARKET_FEATURE_COLUMNS = [
+    f"{prefix}_{metric}"
+    for prefix in MARKET_INDICES
+    for metric in MARKET_METRICS
+]
+
+BASE_FEATURE_COLUMNS = [
     "sma25_ratio",
     "sma75_ratio",
     "rsi14",
@@ -38,46 +62,63 @@ FEATURE_COLUMNS = [
     "volume_ratio",
     "relative_strength_5d",
     "price_position_52w",
-    "nikkei_return_1d",
-    "nikkei_return_5d",
-    "nikkei_return_20d",
-    "nikkei_sma25_ratio",
-    "nikkei_sma75_ratio",
-    "nikkei_rsi14",
-    "nikkei_volatility_20d",
 ]
+
+FEATURE_COLUMNS = BASE_FEATURE_COLUMNS + MARKET_FEATURE_COLUMNS
 
 import os
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "model.pkl")
 
 
-def get_nikkei_returns() -> pd.DataFrame:
-    """日経平均(^N225)の市場環境特徴量を取得。個別銘柄の地合い判定に使う"""
-    hist = yf.Ticker("^N225").history(period="2y")
+def market_default_value(column: str) -> float:
+    """市場環境データが欠けた時に使う中立値"""
+    if column.endswith("_rsi14"):
+        return 50.0
+    return 0.0
+
+
+def build_market_features(symbol: str, prefix: str) -> pd.DataFrame:
+    """市場指数・為替データを同じ形式の特徴量へ変換"""
+    hist = yf.Ticker(symbol).history(period="2y")
+    if hist.empty:
+        print(f"market data empty: {symbol}")
+        return pd.DataFrame(columns=["date"] + [f"{prefix}_{m}" for m in MARKET_METRICS])
+
     hist = hist.reset_index()
     hist["date"] = pd.to_datetime(hist["Date"]).dt.date
-    hist["nikkei_return_1d"] = hist["Close"] / hist["Close"].shift(1) - 1
-    hist["nikkei_return_5d"] = hist["Close"] / hist["Close"].shift(5) - 1
-    hist["nikkei_return_20d"] = hist["Close"] / hist["Close"].shift(20) - 1
-    hist["nikkei_sma25"] = hist["Close"].rolling(25).mean()
-    hist["nikkei_sma75"] = hist["Close"].rolling(75).mean()
-    hist["nikkei_sma25_ratio"] = hist["Close"] / hist["nikkei_sma25"] - 1
-    hist["nikkei_sma75_ratio"] = hist["Close"] / hist["nikkei_sma75"] - 1
-    hist["nikkei_rsi14"] = calc_rsi(hist["Close"], 14)
-    hist["nikkei_volatility_20d"] = hist["nikkei_return_1d"].rolling(20).std()
-    return hist[
-        [
-            "date",
-            "nikkei_return_1d",
-            "nikkei_return_5d",
-            "nikkei_return_20d",
-            "nikkei_sma25_ratio",
-            "nikkei_sma75_ratio",
-            "nikkei_rsi14",
-            "nikkei_volatility_20d",
-        ]
-    ]
+    hist[f"{prefix}_return_1d"] = hist["Close"] / hist["Close"].shift(1) - 1
+    hist[f"{prefix}_return_5d"] = hist["Close"] / hist["Close"].shift(5) - 1
+    hist[f"{prefix}_return_20d"] = hist["Close"] / hist["Close"].shift(20) - 1
+    hist[f"{prefix}_sma25"] = hist["Close"].rolling(25).mean()
+    hist[f"{prefix}_sma75"] = hist["Close"].rolling(75).mean()
+    hist[f"{prefix}_sma25_ratio"] = hist["Close"] / hist[f"{prefix}_sma25"] - 1
+    hist[f"{prefix}_sma75_ratio"] = hist["Close"] / hist[f"{prefix}_sma75"] - 1
+    hist[f"{prefix}_rsi14"] = calc_rsi(hist["Close"], 14)
+    hist[f"{prefix}_volatility_20d"] = hist[f"{prefix}_return_1d"].rolling(20).std()
+
+    return hist[["date"] + [f"{prefix}_{m}" for m in MARKET_METRICS]]
+
+
+def get_nikkei_returns() -> pd.DataFrame:
+    """市場環境特徴量を取得。既存呼び出しとの互換性のため関数名は維持する"""
+    market = None
+    for prefix, symbol in MARKET_INDICES.items():
+        features = build_market_features(symbol, prefix)
+        if market is None:
+            market = features
+        else:
+            market = market.merge(features, on="date", how="outer")
+
+    if market is None or market.empty:
+        return pd.DataFrame(columns=["date"] + MARKET_FEATURE_COLUMNS)
+
+    market = market.sort_values("date").reset_index(drop=True)
+    market[MARKET_FEATURE_COLUMNS] = market[MARKET_FEATURE_COLUMNS].ffill()
+    for column in MARKET_FEATURE_COLUMNS:
+        market[column] = market[column].fillna(market_default_value(column))
+
+    return market[["date"] + MARKET_FEATURE_COLUMNS]
 
 
 def build_features(hist: pd.DataFrame, nikkei: pd.DataFrame | None = None) -> pd.DataFrame:
@@ -102,23 +143,22 @@ def build_features(hist: pd.DataFrame, nikkei: pd.DataFrame | None = None) -> pd
     high_52w = df["Close"].rolling(252, min_periods=60).max()
     df["price_position_52w"] = (df["Close"] - low_52w) / (high_52w - low_52w)
 
-    # 日経平均に対する相対強弱(個別銘柄の5日リターン - 日経平均の5日リターン)
+    # 市場環境データを結合し、日経平均に対する相対強弱も算出する
     if nikkei is not None:
         df["date"] = pd.to_datetime(df["Date"]).dt.date
         df = df.merge(nikkei, on="date", how="left")
-        # 日経平均は休場日のずれで最新日が欠けることがあるため、直前値で埋める
-        market_columns = [c for c in FEATURE_COLUMNS if c.startswith("nikkei_")]
-        df[market_columns] = df[market_columns].ffill()
+        # 市場データは休場日のずれで最新日が欠けることがあるため、直前値で埋める
+        for column in MARKET_FEATURE_COLUMNS:
+            if column not in df.columns:
+                df[column] = market_default_value(column)
+        df[MARKET_FEATURE_COLUMNS] = df[MARKET_FEATURE_COLUMNS].ffill()
+        for column in MARKET_FEATURE_COLUMNS:
+            df[column] = df[column].fillna(market_default_value(column))
         df["relative_strength_5d"] = df["return_5d"] - df["nikkei_return_5d"]
     else:
         df["relative_strength_5d"] = df["return_5d"]
-        df["nikkei_return_1d"] = 0.0
-        df["nikkei_return_5d"] = 0.0
-        df["nikkei_return_20d"] = 0.0
-        df["nikkei_sma25_ratio"] = 0.0
-        df["nikkei_sma75_ratio"] = 0.0
-        df["nikkei_rsi14"] = 50.0
-        df["nikkei_volatility_20d"] = 0.0
+        for column in MARKET_FEATURE_COLUMNS:
+            df[column] = market_default_value(column)
 
     return df
 
@@ -223,7 +263,7 @@ def main():
             "model": model,
             "features": feature_columns,
             "sector_columns": sector_columns,
-            "feature_version": "market_regime_v1",
+            "feature_version": "multi_market_regime_v1",
         },
         MODEL_PATH,
     )
