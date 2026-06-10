@@ -88,7 +88,8 @@ export default async function Home({
               <p className="text-sm text-zinc-500">
                 終値 {s.close?.toLocaleString()} 円 / RSI {s.rsi14?.toFixed(1)}
                 {s.sector && ` / ${s.sector}`}
-                {s.ml_score != null && ` / AI上昇期待度 ${(s.ml_score * 100).toFixed(0)}%`}
+                {signalType === "buy_candidate" && s.ml_score != null &&
+                  ` / AI上昇期待度 ${(s.ml_score * 100).toFixed(0)}%`}
               </p>
             </div>
             <div className="flex flex-col items-end gap-1">

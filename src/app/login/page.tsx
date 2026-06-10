@@ -28,7 +28,7 @@ export default async function LoginPage({
             name="email"
             type="email"
             required
-            className="rounded border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100"
+            className="rounded border border-zinc-700 bg-zinc-800 px-3 py-2 text-base text-zinc-100"
           />
         </div>
 
@@ -41,7 +41,7 @@ export default async function LoginPage({
             name="password"
             type="password"
             required
-            className="rounded border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100"
+            className="rounded border border-zinc-700 bg-zinc-800 px-3 py-2 text-base text-zinc-100"
           />
         </div>
 
