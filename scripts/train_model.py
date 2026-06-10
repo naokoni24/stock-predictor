@@ -16,7 +16,7 @@ import joblib
 import pandas as pd
 import yfinance as yf
 
-from fetch_and_signal import TICKERS, calc_rsi, calc_macd, calc_bollinger, get_screener_tickers
+from fetch_and_signal import TICKERS, calc_rsi, calc_macd, calc_bollinger, get_screener_tickers, get_jp_sector_map
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier
 from sklearn.metrics import accuracy_score, classification_report
 
@@ -37,6 +37,7 @@ FEATURE_COLUMNS = [
     "return_20d",
     "volume_ratio",
     "relative_strength_5d",
+    "price_position_52w",
 ]
 
 import os
@@ -70,6 +71,11 @@ def build_features(hist: pd.DataFrame, nikkei: pd.DataFrame | None = None) -> pd
     # 出来高比率(直近出来高 / 過去20日平均出来高)
     df["volume_ratio"] = df["Volume"] / df["Volume"].rolling(20).mean()
 
+    # 52週(252営業日)高値・安値の中での現在値の位置(0=安値, 1=高値)
+    low_52w = df["Close"].rolling(252, min_periods=60).min()
+    high_52w = df["Close"].rolling(252, min_periods=60).max()
+    df["price_position_52w"] = (df["Close"] - low_52w) / (high_52w - low_52w)
+
     # 日経平均に対する相対強弱(個別銘柄の5日リターン - 日経平均の5日リターン)
     if nikkei is not None:
         df["date"] = pd.to_datetime(df["Date"]).dt.date
@@ -94,6 +100,7 @@ def build_dataset() -> pd.DataFrame:
         all_tickers.setdefault(t, n)
 
     nikkei = get_nikkei_returns()
+    sectors = get_jp_sector_map()
 
     for ticker in all_tickers:
         hist = yf.Ticker(ticker).history(period="2y")
@@ -117,16 +124,23 @@ def build_dataset() -> pd.DataFrame:
         df = df.dropna(subset=FEATURE_COLUMNS + ["label"])
         df = df.iloc[:-HORIZON_DAYS] if len(df) > HORIZON_DAYS else df.iloc[0:0]
 
-        rows.append(df[["date"] + FEATURE_COLUMNS + ["label"]])
+        df = df[["date"] + FEATURE_COLUMNS + ["label"]].copy()
+        df["sector"] = sectors.get(ticker, "不明")
+        rows.append(df)
         print(f"{ticker}: {len(df)} rows")
 
-    return pd.concat(rows, ignore_index=True)
+    dataset = pd.concat(rows, ignore_index=True)
+    dataset = pd.get_dummies(dataset, columns=["sector"], prefix="sector")
+    return dataset
 
 
 def main():
     print("学習データを作成中...")
     dataset = build_dataset()
     print(f"\n合計 {len(dataset)} 行 (上昇ラベル比率: {dataset['label'].mean():.3f})")
+
+    sector_columns = [c for c in dataset.columns if c.startswith("sector_")]
+    feature_columns = FEATURE_COLUMNS + sector_columns
 
     # walk-forward検証: 日付でソートし、直近20%をテストデータにする
     # (ランダム分割だと未来のデータが学習に混ざり精度が甘く出るため)
@@ -137,8 +151,8 @@ def main():
     print(f"学習データ: {train_df['date'].min()} 〜 {train_df['date'].max()} ({len(train_df)}行)")
     print(f"テストデータ: {test_df['date'].min()} 〜 {test_df['date'].max()} ({len(test_df)}行)")
 
-    X_train, y_train = train_df[FEATURE_COLUMNS], train_df["label"]
-    X_test, y_test = test_df[FEATURE_COLUMNS], test_df["label"]
+    X_train, y_train = train_df[feature_columns], train_df["label"]
+    X_test, y_test = test_df[feature_columns], test_df["label"]
 
     # RandomForestとGradientBoostingの予測確率を平均するアンサンブル(過学習を抑え、予測を安定化)
     rf = RandomForestClassifier(
@@ -166,11 +180,14 @@ def main():
     print("特徴量重要度 (RandomForest):")
     rf_fitted = model.named_estimators_["rf"]
     for col, importance in sorted(
-        zip(FEATURE_COLUMNS, rf_fitted.feature_importances_), key=lambda x: -x[1]
+        zip(feature_columns, rf_fitted.feature_importances_), key=lambda x: -x[1]
     ):
         print(f"  {col}: {importance:.3f}")
 
-    joblib.dump({"model": model, "features": FEATURE_COLUMNS}, MODEL_PATH)
+    joblib.dump(
+        {"model": model, "features": feature_columns, "sector_columns": sector_columns},
+        MODEL_PATH,
+    )
     print(f"\nモデルを {MODEL_PATH} に保存しました")
 
 

@@ -12,7 +12,7 @@ import joblib
 import pandas as pd
 import yfinance as yf
 
-from fetch_and_signal import TICKERS, calc_rsi, calc_macd, calc_bollinger
+from fetch_and_signal import TICKERS, calc_rsi, calc_macd, calc_bollinger, get_jp_sector_map
 from train_model import build_features, get_nikkei_returns, FEATURE_COLUMNS, MODEL_PATH
 
 ML_BUY_THRESHOLD = 0.55
@@ -93,6 +93,8 @@ def simulate_ml(
     nikkei: pd.DataFrame,
     require_rule_buy: bool = False,
     threshold: float = ML_BUY_THRESHOLD,
+    sector_columns: list[str] | None = None,
+    sector: str | None = None,
 ) -> list[float]:
     """MLモデル: 上昇確率がthreshold以上で翌日始値で購入 -> HOLD_DAYS後の始値で売却
 
@@ -100,6 +102,8 @@ def simulate_ml(
     (両シグナル一致フィルタ)
     """
     df = build_features(hist, nikkei)
+    for col in sector_columns or []:
+        df[col] = 1 if col == f"sector_{sector}" else 0
     valid = df.dropna(subset=features)
     if valid.empty:
         return []
@@ -148,14 +152,17 @@ def main():
     bundle = joblib.load(MODEL_PATH)
     nikkei = get_nikkei_returns()
     model, features = bundle["model"], bundle["features"]
+    sector_columns = bundle.get("sector_columns", [])
+    jp_sectors = get_jp_sector_map()
 
     rule_returns = []
     ml_returns = []
     consensus_returns = []
-    for hist in histories.values():
+    for ticker, hist in histories.items():
+        sector = jp_sectors.get(ticker)
         rule_returns.extend(simulate_rule(hist))
-        ml_returns.extend(simulate_ml(hist, model, features, nikkei))
-        consensus_returns.extend(simulate_ml(hist, model, features, nikkei, require_rule_buy=True))
+        ml_returns.extend(simulate_ml(hist, model, features, nikkei, sector_columns=sector_columns, sector=sector))
+        consensus_returns.extend(simulate_ml(hist, model, features, nikkei, require_rule_buy=True, sector_columns=sector_columns, sector=sector))
 
     print("ルールベース (RSI買い<60, 売り>75):")
     print(evaluate(rule_returns))
@@ -170,8 +177,9 @@ def main():
     print(f"{'threshold':>10} {'trades':>7} {'win_rate':>9} {'avg_return':>11} {'total_return':>13}")
     for threshold in [0.45, 0.5, 0.55, 0.6, 0.65, 0.7]:
         returns = []
-        for hist in histories.values():
-            returns.extend(simulate_ml(hist, model, features, nikkei, threshold=threshold))
+        for ticker, hist in histories.items():
+            sector = jp_sectors.get(ticker)
+            returns.extend(simulate_ml(hist, model, features, nikkei, threshold=threshold, sector_columns=sector_columns, sector=sector))
         result = evaluate(returns)
         print(
             f"{threshold:>10} {result['trades']:>7} "

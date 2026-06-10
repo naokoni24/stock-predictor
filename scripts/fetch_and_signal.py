@@ -36,7 +36,7 @@ def load_ml_model():
         return None
 
 
-def predict_ml(model_bundle, hist, nikkei) -> tuple[str | None, float | None]:
+def predict_ml(model_bundle, hist, nikkei, sector=None) -> tuple[str | None, float | None]:
     """株価履歴からML予測(ml_signal/ml_score)を計算"""
     if model_bundle is None:
         return None, None
@@ -44,7 +44,11 @@ def predict_ml(model_bundle, hist, nikkei) -> tuple[str | None, float | None]:
     from train_model import build_features
 
     df = build_features(hist, nikkei)
-    row = df.iloc[-1]
+    row = df.iloc[-1].copy()
+
+    # 業種one-hot特徴量を学習時と同じ形式で構築
+    for col in model_bundle.get("sector_columns", []):
+        row[col] = 1 if col == f"sector_{sector}" else 0
 
     if row[model_bundle["features"]].isna().any():
         return None, None
@@ -283,7 +287,7 @@ def main():
         # 最新日のシグナルを保存
         latest = hist.iloc[-1]
         signal, score = make_signal(latest)
-        ml_signal, ml_score = predict_ml(model_bundle, hist, nikkei)
+        ml_signal, ml_score = predict_ml(model_bundle, hist, nikkei, jp_sectors.get(ticker))
         sb.table("signals").upsert(
             {
                 "ticker": ticker,
