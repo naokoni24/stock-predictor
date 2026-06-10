@@ -17,7 +17,7 @@ import pandas as pd
 import yfinance as yf
 
 from fetch_and_signal import TICKERS, calc_rsi, calc_macd, calc_bollinger, get_screener_tickers
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, classification_report
 
@@ -114,12 +114,22 @@ def main():
         X, y, test_size=0.2, random_state=42, shuffle=True
     )
 
-    model = RandomForestClassifier(
+    # RandomForestとGradientBoostingの予測確率を平均するアンサンブル(過学習を抑え、予測を安定化)
+    rf = RandomForestClassifier(
         n_estimators=100,
         max_depth=5,
         min_samples_leaf=20,
         random_state=42,
         n_jobs=-1,
+    )
+    gb = GradientBoostingClassifier(
+        n_estimators=100,
+        max_depth=3,
+        min_samples_leaf=20,
+        random_state=42,
+    )
+    model = VotingClassifier(
+        estimators=[("rf", rf), ("gb", gb)], voting="soft"
     )
     model.fit(X_train, y_train)
 
@@ -127,9 +137,10 @@ def main():
     print(f"\nテストデータ正解率: {accuracy_score(y_test, pred):.3f}")
     print(classification_report(y_test, pred))
 
-    print("特徴量重要度:")
+    print("特徴量重要度 (RandomForest):")
+    rf_fitted = model.named_estimators_["rf"]
     for col, importance in sorted(
-        zip(FEATURE_COLUMNS, model.feature_importances_), key=lambda x: -x[1]
+        zip(FEATURE_COLUMNS, rf_fitted.feature_importances_), key=lambda x: -x[1]
     ):
         print(f"  {col}: {importance:.3f}")
 
