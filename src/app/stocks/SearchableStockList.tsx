@@ -42,7 +42,7 @@ export default function SearchableStockList({ stocks }: { stocks: StockRow[] }) 
         value={query}
         onChange={(e) => setQuery(e.target.value)}
         placeholder="銘柄名・コード・業種で検索"
-        className="w-full rounded-lg border border-zinc-800 px-3 py-2 text-sm"
+        className="w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-base text-zinc-100 placeholder:text-zinc-500"
       />
 
       {filtered.length === 0 && (

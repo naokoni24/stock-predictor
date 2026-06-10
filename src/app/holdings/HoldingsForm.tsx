@@ -69,7 +69,7 @@ export default function HoldingsForm() {
             value={ticker}
             onChange={(e) => setTicker(e.target.value)}
             placeholder="例: 7203.T"
-            className="rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-zinc-100"
+            className="rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-base text-zinc-100"
           />
         </label>
         <label className="flex flex-col gap-1 text-sm">
@@ -78,7 +78,7 @@ export default function HoldingsForm() {
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder="例: トヨタ自動車"
-            className="rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-zinc-100"
+            className="rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-base text-zinc-100"
           />
         </label>
         <label className="flex flex-col gap-1 text-sm">
@@ -90,7 +90,7 @@ export default function HoldingsForm() {
             step="any"
             value={shares}
             onChange={(e) => setShares(e.target.value)}
-            className="rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-zinc-100"
+            className="rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-base text-zinc-100"
           />
         </label>
         <label className="flex flex-col gap-1 text-sm">
@@ -102,7 +102,7 @@ export default function HoldingsForm() {
             step="any"
             value={costPrice}
             onChange={(e) => setCostPrice(e.target.value)}
-            className="rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-zinc-100"
+            className="rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-base text-zinc-100"
           />
         </label>
       </div>
