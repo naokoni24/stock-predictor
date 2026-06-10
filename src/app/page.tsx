@@ -99,10 +99,16 @@ export default async function Home({
               >
                 {SIGNAL_LABEL[s.signal ?? ""] ?? "ー"}
               </span>
-              {s.ml_signal === "buy_candidate" && (
-                <span className="text-xs font-semibold px-2 py-1 rounded-full bg-blue-900/40 text-blue-400">
-                  AI買い候補
+              {s.signal === "buy_candidate" && s.ml_signal === "buy_candidate" ? (
+                <span className="text-xs font-semibold px-2 py-1 rounded-full bg-amber-900/40 text-amber-400">
+                  本命(両シグナル一致)
                 </span>
+              ) : (
+                s.ml_signal === "buy_candidate" && (
+                  <span className="text-xs font-semibold px-2 py-1 rounded-full bg-blue-900/40 text-blue-400">
+                    AI買い候補
+                  </span>
+                )
               )}
             </div>
           </Link>

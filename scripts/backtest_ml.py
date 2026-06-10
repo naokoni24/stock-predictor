@@ -86,8 +86,12 @@ def simulate_rule(hist: pd.DataFrame) -> list[float]:
     return returns
 
 
-def simulate_ml(hist: pd.DataFrame, model, features: list[str]) -> list[float]:
-    """MLモデル: 上昇確率がML_BUY_THRESHOLD以上で翌日始値で購入 -> HOLD_DAYS後の始値で売却"""
+def simulate_ml(hist: pd.DataFrame, model, features: list[str], require_rule_buy: bool = False) -> list[float]:
+    """MLモデル: 上昇確率がML_BUY_THRESHOLD以上で翌日始値で購入 -> HOLD_DAYS後の始値で売却
+
+    require_rule_buy=Trueの場合、ルールベースもbuy_candidateの日のみ購入対象とする
+    (両シグナル一致フィルタ)
+    """
     df = build_features(hist)
     valid = df.dropna(subset=features)
     if valid.empty:
@@ -101,7 +105,11 @@ def simulate_ml(hist: pd.DataFrame, model, features: list[str]) -> list[float]:
     n = len(hist)
     while i < n - 1 - HOLD_DAYS:
         score = df.iloc[i]["ml_score"]
-        if pd.notna(score) and score >= ML_BUY_THRESHOLD:
+        ml_buy = pd.notna(score) and score >= ML_BUY_THRESHOLD
+        if ml_buy and require_rule_buy:
+            ml_buy = make_signal_param(hist.iloc[i]) == "buy_candidate"
+
+        if ml_buy:
             buy_price = hist.iloc[i + 1]["Open"]
             sell_price = hist.iloc[i + 1 + HOLD_DAYS]["Open"]
             returns.append((sell_price - buy_price) / buy_price * 100)
@@ -135,15 +143,20 @@ def main():
 
     rule_returns = []
     ml_returns = []
+    consensus_returns = []
     for hist in histories.values():
         rule_returns.extend(simulate_rule(hist))
         ml_returns.extend(simulate_ml(hist, model, features))
+        consensus_returns.extend(simulate_ml(hist, model, features, require_rule_buy=True))
 
     print("ルールベース (RSI買い<60, 売り>75):")
     print(evaluate(rule_returns))
 
-    print(f"\nMLモデル (上昇確率>={ML_BUY_THRESHOLD}, {HOLD_DAYS}日後に売却):")
+    print(f"\nMLモデル単独 (上昇確率>={ML_BUY_THRESHOLD}, {HOLD_DAYS}日後に売却):")
     print(evaluate(ml_returns))
+
+    print(f"\n両シグナル一致 (ルール買い候補 かつ ML上昇確率>={ML_BUY_THRESHOLD}):")
+    print(evaluate(consensus_returns))
 
 
 if __name__ == "__main__":

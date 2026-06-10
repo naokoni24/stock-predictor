@@ -33,32 +33,20 @@ def load_ml_model():
         return None
 
 
-def predict_ml(model_bundle, row) -> tuple[str | None, float | None]:
-    """テクニカル指標からML予測(ml_signal/ml_score)を計算"""
+def predict_ml(model_bundle, hist) -> tuple[str | None, float | None]:
+    """株価履歴からML予測(ml_signal/ml_score)を計算"""
     if model_bundle is None:
         return None, None
 
-    if (
-        pd.isna(row["sma25"])
-        or pd.isna(row["sma75"])
-        or pd.isna(row["rsi14"])
-        or pd.isna(row["macd"])
-        or pd.isna(row["macd_signal"])
-        or pd.isna(row["bb_upper"])
-        or pd.isna(row["bb_lower"])
-    ):
+    from train_model import build_features
+
+    df = build_features(hist)
+    row = df.iloc[-1]
+
+    if row[model_bundle["features"]].isna().any():
         return None, None
 
-    bb_width = row["bb_upper"] - row["bb_lower"]
-    features = pd.DataFrame([{
-        "sma25_ratio": row["Close"] / row["sma25"] - 1,
-        "sma75_ratio": row["Close"] / row["sma75"] - 1,
-        "rsi14": row["rsi14"],
-        "macd": row["macd"],
-        "macd_signal": row["macd_signal"],
-        "macd_diff": row["macd"] - row["macd_signal"],
-        "bb_position": (row["Close"] - row["bb_lower"]) / bb_width if bb_width else 0.0,
-    }])[model_bundle["features"]]
+    features = pd.DataFrame([row[model_bundle["features"]]])
 
     score = float(model_bundle["model"].predict_proba(features)[0, 1])
     signal = "buy_candidate" if score >= 0.5 else "hold"
@@ -288,7 +276,7 @@ def main():
         # 最新日のシグナルを保存
         latest = hist.iloc[-1]
         signal, score = make_signal(latest)
-        ml_signal, ml_score = predict_ml(model_bundle, latest)
+        ml_signal, ml_score = predict_ml(model_bundle, hist)
         sb.table("signals").upsert(
             {
                 "ticker": ticker,

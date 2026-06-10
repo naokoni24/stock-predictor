@@ -33,6 +33,10 @@ FEATURE_COLUMNS = [
     "macd_signal",
     "macd_diff",
     "bb_position",
+    "return_1d",
+    "return_5d",
+    "return_20d",
+    "volume_ratio",
 ]
 
 import os
@@ -48,6 +52,15 @@ def build_features(hist: pd.DataFrame) -> pd.DataFrame:
     df["macd_diff"] = df["macd"] - df["macd_signal"]
     bb_width = df["bb_upper"] - df["bb_lower"]
     df["bb_position"] = (df["Close"] - df["bb_lower"]) / bb_width
+
+    # 騰落率(過去N日間のリターン)
+    df["return_1d"] = df["Close"] / df["Close"].shift(1) - 1
+    df["return_5d"] = df["Close"] / df["Close"].shift(5) - 1
+    df["return_20d"] = df["Close"] / df["Close"].shift(20) - 1
+
+    # 出来高比率(直近出来高 / 過去20日平均出来高)
+    df["volume_ratio"] = df["Volume"] / df["Volume"].rolling(20).mean()
+
     return df
 
 
