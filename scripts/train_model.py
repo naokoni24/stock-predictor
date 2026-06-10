@@ -16,7 +16,7 @@ import joblib
 import pandas as pd
 import yfinance as yf
 
-from fetch_and_signal import TICKERS, calc_rsi, calc_macd, calc_bollinger
+from fetch_and_signal import TICKERS, calc_rsi, calc_macd, calc_bollinger, get_screener_tickers
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, classification_report
@@ -66,7 +66,15 @@ def build_features(hist: pd.DataFrame) -> pd.DataFrame:
 
 def build_dataset() -> pd.DataFrame:
     rows = []
-    for ticker in TICKERS:
+
+    # 主力銘柄 + スクリーニング銘柄(値上がり/値下がり上位)を学習データに含めて母数を増やす
+    all_tickers = dict(TICKERS)
+    screener_tickers = get_screener_tickers()
+    print(f"screener found {len(screener_tickers)} tickers")
+    for t, n in screener_tickers.items():
+        all_tickers.setdefault(t, n)
+
+    for ticker in all_tickers:
         hist = yf.Ticker(ticker).history(period="2y")
         if hist.empty:
             continue

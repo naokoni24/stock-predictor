@@ -15,7 +15,7 @@ import yfinance as yf
 from fetch_and_signal import TICKERS, calc_rsi, calc_macd, calc_bollinger
 from train_model import build_features, FEATURE_COLUMNS, MODEL_PATH
 
-ML_BUY_THRESHOLD = 0.5
+ML_BUY_THRESHOLD = 0.55
 HOLD_DAYS = 5
 
 
@@ -86,8 +86,14 @@ def simulate_rule(hist: pd.DataFrame) -> list[float]:
     return returns
 
 
-def simulate_ml(hist: pd.DataFrame, model, features: list[str], require_rule_buy: bool = False) -> list[float]:
-    """MLモデル: 上昇確率がML_BUY_THRESHOLD以上で翌日始値で購入 -> HOLD_DAYS後の始値で売却
+def simulate_ml(
+    hist: pd.DataFrame,
+    model,
+    features: list[str],
+    require_rule_buy: bool = False,
+    threshold: float = ML_BUY_THRESHOLD,
+) -> list[float]:
+    """MLモデル: 上昇確率がthreshold以上で翌日始値で購入 -> HOLD_DAYS後の始値で売却
 
     require_rule_buy=Trueの場合、ルールベースもbuy_candidateの日のみ購入対象とする
     (両シグナル一致フィルタ)
@@ -105,7 +111,7 @@ def simulate_ml(hist: pd.DataFrame, model, features: list[str], require_rule_buy
     n = len(hist)
     while i < n - 1 - HOLD_DAYS:
         score = df.iloc[i]["ml_score"]
-        ml_buy = pd.notna(score) and score >= ML_BUY_THRESHOLD
+        ml_buy = pd.notna(score) and score >= threshold
         if ml_buy and require_rule_buy:
             ml_buy = make_signal_param(hist.iloc[i]) == "buy_candidate"
 
@@ -157,6 +163,18 @@ def main():
 
     print(f"\n両シグナル一致 (ルール買い候補 かつ ML上昇確率>={ML_BUY_THRESHOLD}):")
     print(evaluate(consensus_returns))
+
+    print("\nML_BUY_THRESHOLD グリッドサーチ:")
+    print(f"{'threshold':>10} {'trades':>7} {'win_rate':>9} {'avg_return':>11} {'total_return':>13}")
+    for threshold in [0.45, 0.5, 0.55, 0.6, 0.65, 0.7]:
+        returns = []
+        for hist in histories.values():
+            returns.extend(simulate_ml(hist, model, features, threshold=threshold))
+        result = evaluate(returns)
+        print(
+            f"{threshold:>10} {result['trades']:>7} "
+            f"{result['win_rate']:>8.1f}% {result['avg_return']:>10.2f}% {result['total_return']:>12.1f}%"
+        )
 
 
 if __name__ == "__main__":

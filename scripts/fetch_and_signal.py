@@ -23,6 +23,9 @@ from supabase import create_client
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "model.pkl")
 
+# バックテストのグリッドサーチで勝率・リターンのバランスが良かった閾値
+ML_BUY_THRESHOLD = 0.55
+
 
 def load_ml_model():
     """学習済みモデルを読み込む。存在しない場合はNoneを返す(ML推論をスキップ)"""
@@ -49,7 +52,7 @@ def predict_ml(model_bundle, hist) -> tuple[str | None, float | None]:
     features = pd.DataFrame([row[model_bundle["features"]]])
 
     score = float(model_bundle["model"].predict_proba(features)[0, 1])
-    signal = "buy_candidate" if score >= 0.5 else "hold"
+    signal = "buy_candidate" if score >= ML_BUY_THRESHOLD else "hold"
     return signal, round(score, 4)
 
 # 対象銘柄(ティッカー: 名称)。必要に応じて追加・holdingsテーブルと連動させる
