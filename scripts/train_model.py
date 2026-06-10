@@ -67,6 +67,10 @@ BASE_FEATURE_COLUMNS = [
     "return_5d",
     "return_20d",
     "volume_ratio",
+    "volume_price_momentum_5d",
+    "volume_price_momentum_20d",
+    "volume_up_pressure_5d",
+    "volume_down_pressure_5d",
     "relative_strength_5d",
     "price_position_52w",
 ]
@@ -150,6 +154,13 @@ def build_features(hist: pd.DataFrame, nikkei: pd.DataFrame | None = None) -> pd
 
     # 出来高比率(直近出来高 / 過去20日平均出来高)
     df["volume_ratio"] = df["Volume"] / df["Volume"].rolling(20).mean()
+    df["volume_ratio_5d"] = df["Volume"] / df["Volume"].rolling(5).mean()
+
+    # 出来高を伴う上昇/下落の勢い。値動きだけでなく、市場参加者の厚みも見る。
+    df["volume_price_momentum_5d"] = df["return_5d"] * df["volume_ratio_5d"]
+    df["volume_price_momentum_20d"] = df["return_20d"] * df["volume_ratio"]
+    df["volume_up_pressure_5d"] = df["volume_price_momentum_5d"].clip(lower=0)
+    df["volume_down_pressure_5d"] = (-df["volume_price_momentum_5d"]).clip(lower=0)
 
     # 52週(252営業日)高値・安値の中での現在値の位置(0=安値, 1=高値)
     low_52w = df["Close"].rolling(252, min_periods=60).min()
