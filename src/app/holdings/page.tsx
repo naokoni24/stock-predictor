@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { supabase } from "@/lib/supabase";
 import HoldingsForm from "./HoldingsForm";
 import DeleteHoldingButton from "./DeleteHoldingButton";
@@ -68,10 +69,13 @@ export default async function HoldingsPage() {
             className="flex items-center justify-between rounded-lg border bg-white px-4 py-3"
           >
             <div>
-              <p className="font-semibold">
+              <Link
+                href={`/stock/${h.ticker}`}
+                className="font-semibold hover:underline"
+              >
                 {h.stockName ?? h.ticker}{" "}
                 <span className="text-zinc-400 text-xs">{h.ticker}</span>
-              </p>
+              </Link>
               <p className="text-sm text-zinc-500">
                 {h.shares}株 / 取得単価 {h.cost_price.toLocaleString()}円
                 {h.currentPrice != null && (

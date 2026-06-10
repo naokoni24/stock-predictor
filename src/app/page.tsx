@@ -71,9 +71,10 @@ export default async function Home({
 
       <div className="flex flex-col gap-2">
         {rows.map((s) => (
-          <div
+          <Link
             key={s.ticker}
-            className="flex items-center justify-between rounded-lg border bg-white px-4 py-3"
+            href={`/stock/${s.ticker}`}
+            className="flex items-center justify-between rounded-lg border bg-white px-4 py-3 hover:bg-zinc-50"
           >
             <div>
               <p className="font-semibold">
@@ -91,7 +92,7 @@ export default async function Home({
             >
               {SIGNAL_LABEL[s.signal ?? ""] ?? "ー"}
             </span>
-          </div>
+          </Link>
         ))}
       </div>
     </div>
