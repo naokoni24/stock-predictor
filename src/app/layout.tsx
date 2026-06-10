@@ -1,9 +1,11 @@
 import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
-import Link from "next/link";
 import "./globals.css";
 import { createClient } from "@/lib/supabase-server";
 import { logout } from "./login/actions";
+import { ThemeProvider } from "@/components/theme-provider";
+import { SiteSidebar } from "@/components/site-sidebar";
+import { SiteHeader } from "@/components/site-header";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -16,8 +18,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "株価予測アプリ",
-  description: "本日のおすすめ株と保有株の売り時をチェック",
+  title: "StockSense AI | 株価予測ダッシュボード",
+  description: "本日のおすすめ株と保有株の売り時をAIでチェック",
 };
 
 export const viewport: Viewport = {
@@ -39,29 +41,26 @@ export default async function RootLayout({
   return (
     <html
       lang="ja"
+      suppressHydrationWarning
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col bg-zinc-950 text-zinc-100">
-        <header className="border-b border-zinc-800 border-zinc-800 bg-zinc-900">
-          <nav className="max-w-3xl mx-auto flex items-center gap-6 px-4 py-3 text-sm font-medium">
-            <Link href="/">本日のおすすめ</Link>
-            <Link href="/holdings">保有株</Link>
-            <Link href="/stocks">登録銘柄一覧</Link>
-            {user && (
-              <form action={logout} className="ml-auto">
-                <button
-                  type="submit"
-                  className="text-zinc-500 hover:text-zinc-200"
-                >
-                  ログアウト
-                </button>
-              </form>
-            )}
-          </nav>
-        </header>
-        <main className="flex-1 max-w-3xl mx-auto w-full px-4 py-6">
-          {children}
-        </main>
+      <body className="min-h-full bg-background text-foreground">
+        <ThemeProvider
+          attribute="class"
+          defaultTheme="dark"
+          enableSystem
+          disableTransitionOnChange
+        >
+          <div className="flex min-h-svh">
+            <SiteSidebar />
+            <div className="flex min-w-0 flex-1 flex-col">
+              <SiteHeader isLoggedIn={!!user} onLogout={logout} />
+              <main className="flex-1 mx-auto w-full max-w-6xl px-4 py-6 md:px-8 md:py-8">
+                {children}
+              </main>
+            </div>
+          </div>
+        </ThemeProvider>
       </body>
     </html>
   );

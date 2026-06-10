@@ -1,4 +1,9 @@
+import { LineChart } from "lucide-react";
 import { login } from "./actions";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Label } from "@/components/ui/label";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
 
 export default async function LoginPage({
   searchParams,
@@ -8,50 +13,34 @@ export default async function LoginPage({
   const { error } = await searchParams;
 
   return (
-    <div className="flex flex-col items-center justify-center flex-1">
-      <form
-        action={login}
-        className="flex flex-col gap-4 w-full max-w-sm rounded-lg border border-zinc-800 bg-zinc-900 p-6"
-      >
-        <h1 className="text-xl font-bold text-center">ログイン</h1>
+    <div className="flex flex-col items-center justify-center flex-1 py-12">
+      <Card className="w-full max-w-sm">
+        <CardHeader className="items-center text-center gap-2">
+          <div className="flex size-10 items-center justify-center rounded-xl bg-primary text-primary-foreground">
+            <LineChart className="size-5" />
+          </div>
+          <CardTitle className="text-xl">StockSense AI にログイン</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <form action={login} className="flex flex-col gap-4">
+            {error && <p className="text-bearish text-sm text-center">{error}</p>}
 
-        {error && (
-          <p className="text-red-400 text-sm text-center">{error}</p>
-        )}
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="email">メールアドレス</Label>
+              <Input id="email" name="email" type="email" required />
+            </div>
 
-        <div className="flex flex-col gap-1">
-          <label htmlFor="email" className="text-sm font-medium">
-            メールアドレス
-          </label>
-          <input
-            id="email"
-            name="email"
-            type="email"
-            required
-            className="rounded border border-zinc-700 bg-zinc-800 px-3 py-2 text-base text-zinc-100"
-          />
-        </div>
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="password">パスワード</Label>
+              <Input id="password" name="password" type="password" required />
+            </div>
 
-        <div className="flex flex-col gap-1">
-          <label htmlFor="password" className="text-sm font-medium">
-            パスワード
-          </label>
-          <input
-            id="password"
-            name="password"
-            type="password"
-            required
-            className="rounded border border-zinc-700 bg-zinc-800 px-3 py-2 text-base text-zinc-100"
-          />
-        </div>
-
-        <button
-          type="submit"
-          className="rounded bg-emerald-600 text-white text-sm font-medium px-4 py-2 hover:bg-emerald-500"
-        >
-          ログイン
-        </button>
-      </form>
+            <Button type="submit" className="mt-2">
+              ログイン
+            </Button>
+          </form>
+        </CardContent>
+      </Card>
     </div>
   );
 }

@@ -2,17 +2,14 @@
 
 import { useState } from "react";
 import Link from "next/link";
+import { Search } from "lucide-react";
+import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
 
 const SIGNAL_LABEL: Record<string, string> = {
   buy_candidate: "買い候補",
   sell_candidate: "売り候補",
   hold: "様子見",
-};
-
-const SIGNAL_COLOR: Record<string, string> = {
-  buy_candidate: "bg-green-900/40 text-green-400",
-  sell_candidate: "bg-red-900/40 text-red-400",
-  hold: "bg-zinc-800 text-zinc-300",
 };
 
 type StockRow = {
@@ -37,16 +34,19 @@ export default function SearchableStockList({ stocks }: { stocks: StockRow[] }) 
 
   return (
     <div className="flex flex-col gap-4">
-      <input
-        type="text"
-        value={query}
-        onChange={(e) => setQuery(e.target.value)}
-        placeholder="銘柄名・コード・業種で検索"
-        className="w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-base text-zinc-100 placeholder:text-zinc-500"
-      />
+      <div className="relative">
+        <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
+        <Input
+          type="text"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="銘柄名・コード・業種で検索"
+          className="pl-9"
+        />
+      </div>
 
       {filtered.length === 0 && (
-        <p className="text-zinc-500 text-sm">該当する銘柄がありません。</p>
+        <p className="text-muted-foreground text-sm">該当する銘柄がありません。</p>
       )}
 
       <div className="flex flex-col gap-2">
@@ -54,23 +54,28 @@ export default function SearchableStockList({ stocks }: { stocks: StockRow[] }) 
           <Link
             key={s.ticker}
             href={`/stock/${s.ticker}`}
-            className="flex items-center justify-between rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3 hover:bg-zinc-950"
+            className="flex items-center justify-between rounded-xl border border-border bg-card px-4 py-3.5 transition-colors hover:bg-accent/50"
           >
-            <div>
-              <p className="font-semibold">
+            <div className="min-w-0">
+              <p className="font-semibold truncate">
                 {s.name ?? s.ticker}{" "}
-                <span className="text-zinc-500 text-xs">{s.ticker}</span>
+                <span className="text-muted-foreground text-xs">{s.ticker}</span>
               </p>
-              {s.sector && <p className="text-xs text-zinc-500">{s.sector}</p>}
+              {s.sector && <p className="text-xs text-muted-foreground mt-0.5">{s.sector}</p>}
             </div>
             {s.signal && (
-              <span
-                className={`text-xs font-semibold px-2 py-1 rounded-full ${
-                  SIGNAL_COLOR[s.signal] ?? "bg-zinc-800 text-zinc-300"
-                }`}
+              <Badge
+                variant={s.signal === "hold" ? "outline" : "default"}
+                className={
+                  s.signal === "buy_candidate"
+                    ? "bg-bullish text-bullish-foreground"
+                    : s.signal === "sell_candidate"
+                      ? "bg-bearish text-bearish-foreground"
+                      : ""
+                }
               >
                 {SIGNAL_LABEL[s.signal] ?? "ー"}
-              </span>
+              </Badge>
             )}
           </Link>
         ))}

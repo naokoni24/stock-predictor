@@ -3,6 +3,10 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Label } from "@/components/ui/label";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
 
 export default function HoldingsForm() {
   const router = useRouter();
@@ -55,67 +59,65 @@ export default function HoldingsForm() {
   }
 
   return (
-    <form
-      onSubmit={handleSubmit}
-      className="flex flex-col gap-3 rounded-lg border border-zinc-800 bg-zinc-900 p-4"
-    >
-      <h2 className="font-semibold text-sm">保有株を追加</h2>
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">保有株を追加</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="ticker">ティッカー</Label>
+              <Input
+                id="ticker"
+                required
+                value={ticker}
+                onChange={(e) => setTicker(e.target.value)}
+                placeholder="例: 7203.T"
+              />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="name">銘柄名（任意）</Label>
+              <Input
+                id="name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="例: トヨタ自動車"
+              />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="shares">株数</Label>
+              <Input
+                id="shares"
+                required
+                type="number"
+                min="0"
+                step="any"
+                value={shares}
+                onChange={(e) => setShares(e.target.value)}
+              />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="costPrice">取得単価（円）</Label>
+              <Input
+                id="costPrice"
+                required
+                type="number"
+                min="0"
+                step="any"
+                value={costPrice}
+                onChange={(e) => setCostPrice(e.target.value)}
+              />
+            </div>
+          </div>
 
-      <div className="grid grid-cols-2 gap-3">
-        <label className="flex flex-col gap-1 text-sm">
-          ティッカー
-          <input
-            required
-            value={ticker}
-            onChange={(e) => setTicker(e.target.value)}
-            placeholder="例: 7203.T"
-            className="rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-base text-zinc-100"
-          />
-        </label>
-        <label className="flex flex-col gap-1 text-sm">
-          銘柄名（任意）
-          <input
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="例: トヨタ自動車"
-            className="rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-base text-zinc-100"
-          />
-        </label>
-        <label className="flex flex-col gap-1 text-sm">
-          株数
-          <input
-            required
-            type="number"
-            min="0"
-            step="any"
-            value={shares}
-            onChange={(e) => setShares(e.target.value)}
-            className="rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-base text-zinc-100"
-          />
-        </label>
-        <label className="flex flex-col gap-1 text-sm">
-          取得単価（円）
-          <input
-            required
-            type="number"
-            min="0"
-            step="any"
-            value={costPrice}
-            onChange={(e) => setCostPrice(e.target.value)}
-            className="rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-base text-zinc-100"
-          />
-        </label>
-      </div>
+          {error && <p className="text-bearish text-sm">エラー: {error}</p>}
 
-      {error && <p className="text-red-400 text-sm">エラー: {error}</p>}
-
-      <button
-        type="submit"
-        disabled={submitting}
-        className="self-start rounded bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
-      >
-        {submitting ? "追加中..." : "追加"}
-      </button>
-    </form>
+          <Button type="submit" disabled={submitting} className="self-start">
+            {submitting ? "追加中..." : "追加"}
+          </Button>
+        </form>
+      </CardContent>
+    </Card>
   );
 }

@@ -2,7 +2,9 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { Trash2 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
+import { Button } from "@/components/ui/button";
 
 export default function DeleteHoldingButton({ id }: { id: number }) {
   const router = useRouter();
@@ -21,12 +23,15 @@ export default function DeleteHoldingButton({ id }: { id: number }) {
   }
 
   return (
-    <button
+    <Button
+      variant="ghost"
+      size="icon"
+      className="size-8 text-muted-foreground hover:text-bearish"
       onClick={handleDelete}
       disabled={loading}
-      className="text-xs text-zinc-500 hover:text-red-400 disabled:opacity-50"
+      aria-label="削除"
     >
-      削除
-    </button>
+      <Trash2 className="size-4" />
+    </Button>
   );
 }
