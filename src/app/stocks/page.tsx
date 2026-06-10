@@ -1,17 +1,5 @@
-import Link from "next/link";
 import { supabase } from "@/lib/supabase";
-
-const SIGNAL_LABEL: Record<string, string> = {
-  buy_candidate: "買い候補",
-  sell_candidate: "売り候補",
-  hold: "様子見",
-};
-
-const SIGNAL_COLOR: Record<string, string> = {
-  buy_candidate: "bg-green-100 text-green-800",
-  sell_candidate: "bg-red-100 text-red-800",
-  hold: "bg-zinc-100 text-zinc-700",
-};
+import SearchableStockList from "./SearchableStockList";
 
 export default async function StocksPage() {
   const { data: stocks, error } = await supabase
@@ -36,6 +24,11 @@ export default async function StocksPage() {
     }
   }
 
+  const rows = (stocks ?? []).map((s) => ({
+    ...s,
+    signal: latestSignalByTicker.get(s.ticker) ?? null,
+  }));
+
   return (
     <div className="flex flex-col gap-4">
       <h1 className="text-xl font-bold">登録銘柄一覧</h1>
@@ -46,41 +39,11 @@ export default async function StocksPage() {
         </p>
       )}
 
-      {!error && (!stocks || stocks.length === 0) && (
+      {!error && rows.length === 0 && (
         <p className="text-zinc-500 text-sm">登録銘柄がありません。</p>
       )}
 
-      <div className="flex flex-col gap-2">
-        {(stocks ?? []).map((s) => {
-          const signal = latestSignalByTicker.get(s.ticker) ?? null;
-          return (
-            <Link
-              key={s.ticker}
-              href={`/stock/${s.ticker}`}
-              className="flex items-center justify-between rounded-lg border bg-white px-4 py-3 hover:bg-zinc-50"
-            >
-              <div>
-                <p className="font-semibold">
-                  {s.name ?? s.ticker}{" "}
-                  <span className="text-zinc-400 text-xs">{s.ticker}</span>
-                </p>
-                {s.sector && (
-                  <p className="text-xs text-zinc-500">{s.sector}</p>
-                )}
-              </div>
-              {signal && (
-                <span
-                  className={`text-xs font-semibold px-2 py-1 rounded-full ${
-                    SIGNAL_COLOR[signal] ?? "bg-zinc-100 text-zinc-700"
-                  }`}
-                >
-                  {SIGNAL_LABEL[signal] ?? "ー"}
-                </span>
-              )}
-            </Link>
-          );
-        })}
-      </div>
+      {!error && rows.length > 0 && <SearchableStockList stocks={rows} />}
     </div>
   );
 }
