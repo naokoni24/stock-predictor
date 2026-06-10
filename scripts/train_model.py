@@ -38,6 +38,13 @@ FEATURE_COLUMNS = [
     "volume_ratio",
     "relative_strength_5d",
     "price_position_52w",
+    "nikkei_return_1d",
+    "nikkei_return_5d",
+    "nikkei_return_20d",
+    "nikkei_sma25_ratio",
+    "nikkei_sma75_ratio",
+    "nikkei_rsi14",
+    "nikkei_volatility_20d",
 ]
 
 import os
@@ -46,12 +53,31 @@ MODEL_PATH = os.path.join(os.path.dirname(__file__), "model.pkl")
 
 
 def get_nikkei_returns() -> pd.DataFrame:
-    """日経平均(^N225)の日次5日リターンを取得。日付でマージして相対強弱の算出に使う"""
+    """日経平均(^N225)の市場環境特徴量を取得。個別銘柄の地合い判定に使う"""
     hist = yf.Ticker("^N225").history(period="2y")
     hist = hist.reset_index()
     hist["date"] = pd.to_datetime(hist["Date"]).dt.date
+    hist["nikkei_return_1d"] = hist["Close"] / hist["Close"].shift(1) - 1
     hist["nikkei_return_5d"] = hist["Close"] / hist["Close"].shift(5) - 1
-    return hist[["date", "nikkei_return_5d"]]
+    hist["nikkei_return_20d"] = hist["Close"] / hist["Close"].shift(20) - 1
+    hist["nikkei_sma25"] = hist["Close"].rolling(25).mean()
+    hist["nikkei_sma75"] = hist["Close"].rolling(75).mean()
+    hist["nikkei_sma25_ratio"] = hist["Close"] / hist["nikkei_sma25"] - 1
+    hist["nikkei_sma75_ratio"] = hist["Close"] / hist["nikkei_sma75"] - 1
+    hist["nikkei_rsi14"] = calc_rsi(hist["Close"], 14)
+    hist["nikkei_volatility_20d"] = hist["nikkei_return_1d"].rolling(20).std()
+    return hist[
+        [
+            "date",
+            "nikkei_return_1d",
+            "nikkei_return_5d",
+            "nikkei_return_20d",
+            "nikkei_sma25_ratio",
+            "nikkei_sma75_ratio",
+            "nikkei_rsi14",
+            "nikkei_volatility_20d",
+        ]
+    ]
 
 
 def build_features(hist: pd.DataFrame, nikkei: pd.DataFrame | None = None) -> pd.DataFrame:
@@ -81,10 +107,18 @@ def build_features(hist: pd.DataFrame, nikkei: pd.DataFrame | None = None) -> pd
         df["date"] = pd.to_datetime(df["Date"]).dt.date
         df = df.merge(nikkei, on="date", how="left")
         # 日経平均は休場日のずれで最新日が欠けることがあるため、直前値で埋める
-        df["nikkei_return_5d"] = df["nikkei_return_5d"].ffill()
+        market_columns = [c for c in FEATURE_COLUMNS if c.startswith("nikkei_")]
+        df[market_columns] = df[market_columns].ffill()
         df["relative_strength_5d"] = df["return_5d"] - df["nikkei_return_5d"]
     else:
         df["relative_strength_5d"] = df["return_5d"]
+        df["nikkei_return_1d"] = 0.0
+        df["nikkei_return_5d"] = 0.0
+        df["nikkei_return_20d"] = 0.0
+        df["nikkei_sma25_ratio"] = 0.0
+        df["nikkei_sma75_ratio"] = 0.0
+        df["nikkei_rsi14"] = 50.0
+        df["nikkei_volatility_20d"] = 0.0
 
     return df
 
@@ -185,7 +219,12 @@ def main():
         print(f"  {col}: {importance:.3f}")
 
     joblib.dump(
-        {"model": model, "features": feature_columns, "sector_columns": sector_columns},
+        {
+            "model": model,
+            "features": feature_columns,
+            "sector_columns": sector_columns,
+            "feature_version": "market_regime_v1",
+        },
         MODEL_PATH,
     )
     print(f"\nモデルを {MODEL_PATH} に保存しました")
