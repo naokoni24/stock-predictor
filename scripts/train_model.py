@@ -301,7 +301,11 @@ def main():
     dataset = build_dataset()
     print(f"\n合計 {len(dataset)} 行 (上昇ラベル比率: {dataset['label'].mean():.3f})")
 
-    sector_columns = [c for c in dataset.columns if c.startswith("sector_")]
+    # 業種one-hot列のみを抽出する。sector_return_* などの数値特徴量は除外する。
+    sector_columns = [
+        c for c in dataset.columns
+        if c.startswith("sector_") and c not in FEATURE_COLUMNS
+    ]
     feature_columns = FEATURE_COLUMNS + sector_columns
 
     # walk-forward検証: 日付でソートし、直近20%をテストデータにする
