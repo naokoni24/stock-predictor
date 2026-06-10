@@ -85,7 +85,7 @@ def get_jp_name_map() -> dict[str, str]:
         return {}
 
 
-def get_screener_tickers(size: int = 25) -> dict[str, str]:
+def get_screener_tickers(size: int = 50) -> dict[str, str]:
     """Yahooファイナンスのスクリーニング(値上がり率/出来高 上位、日本株)から銘柄を取得"""
     queries = {
         "gainers": EquityQuery(
