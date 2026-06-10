@@ -46,7 +46,6 @@ TICKERS = {
     # IT・AI関連
     "4689.T": "LINEヤフー",
     "4755.T": "楽天グループ",
-    "9613.T": "NTTデータグループ",
     "4385.T": "メルカリ",
     "3659.T": "ネクソン",
     # エネルギー関連
@@ -159,7 +158,7 @@ def make_signal(row) -> tuple[str | None, float]:
     macd_diff = row["macd"] - row["macd_signal"]
 
     # ゴールデンクロス気味（短期線が長期線の上）+ RSIが過熱でない -> 買い候補
-    if row["sma25"] > row["sma75"] and row["rsi14"] < 70:
+    if row["sma25"] > row["sma75"] and row["rsi14"] < 60:
         signal = "buy_candidate"
         score += (row["sma25"] / row["sma75"] - 1) * 100
         score += max(0, 50 - row["rsi14"]) * 0.1
@@ -178,7 +177,7 @@ def make_signal(row) -> tuple[str | None, float]:
     # デッドクロス気味、RSI過熱、MACDデッドクロス、バンド上限超え -> 売り候補
     if (
         row["sma25"] < row["sma75"]
-        or row["rsi14"] > 70
+        or row["rsi14"] > 75
         or macd_diff < 0
         or row["Close"] > row["bb_upper"]
     ):
