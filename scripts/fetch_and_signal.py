@@ -35,14 +35,14 @@ def load_ml_model():
         return None
 
 
-def predict_ml(model_bundle, hist, nikkei, sector=None) -> tuple[str | None, float | None]:
+def predict_ml(model_bundle, hist, nikkei, sector=None, feature_df=None) -> tuple[str | None, float | None]:
     """株価履歴からML予測(ml_signal/ml_score)を計算"""
     if model_bundle is None:
         return None, None
 
     from train_model import build_features
 
-    df = build_features(hist, nikkei)
+    df = feature_df if feature_df is not None else build_features(hist, nikkei)
     row = df.iloc[-1].copy()
 
     # 業種one-hot特徴量を学習時と同じ形式で構築
@@ -251,6 +251,7 @@ def main():
         ]
     ).execute()
 
+    histories = {}
     for ticker in all_tickers:
         hist = yf.Ticker(ticker).history(period="6mo")
         if hist.empty:
@@ -280,12 +281,30 @@ def main():
             for _, r in hist.tail(30).iterrows()
         ]
         sb.table("prices").upsert(price_rows).execute()
+        histories[ticker] = hist
 
+    feature_frames = {}
+    if model_bundle is not None:
+        from train_model import add_sector_relative_features, build_features
+
+        feature_frames = {
+            ticker: build_features(hist, nikkei)
+            for ticker, hist in histories.items()
+        }
+        feature_frames = add_sector_relative_features(feature_frames, jp_sectors)
+
+    for ticker, hist in histories.items():
         # 最新日のシグナルを保存
         latest = hist.iloc[-1]
         market_date = latest["date"]
         signal, score = make_signal(latest)
-        ml_signal, ml_score = predict_ml(model_bundle, hist, nikkei, jp_sectors.get(ticker))
+        ml_signal, ml_score = predict_ml(
+            model_bundle,
+            hist,
+            nikkei,
+            jp_sectors.get(ticker),
+            feature_frames.get(ticker),
+        )
         sb.table("signals").upsert(
             {
                 "ticker": ticker,
