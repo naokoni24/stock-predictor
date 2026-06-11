@@ -216,12 +216,18 @@ export default async function Home() {
         <div className="lg:col-span-2 flex flex-col gap-4">
           <Tabs defaultValue="buy" className="flex-col gap-3">
             <TabsList>
-              <TabsTrigger value="buy" className="gap-1.5 data-[state=active]:text-bullish">
+              <TabsTrigger
+                value="buy"
+                className="gap-1.5 data-[state=active]:bg-bullish/15 data-[state=active]:text-bullish data-[state=active]:font-semibold dark:data-[state=active]:bg-bullish/15"
+              >
                 <ArrowUpRight className="size-4" />
                 買い候補
                 <Badge variant="secondary" className="ml-1">{buy.rows.length}</Badge>
               </TabsTrigger>
-              <TabsTrigger value="sell" className="gap-1.5 data-[state=active]:text-bearish">
+              <TabsTrigger
+                value="sell"
+                className="gap-1.5 data-[state=active]:bg-bearish/15 data-[state=active]:text-bearish data-[state=active]:font-semibold dark:data-[state=active]:bg-bearish/15"
+              >
                 <ArrowDownRight className="size-4" />
                 売り候補
                 <Badge variant="secondary" className="ml-1">{sell.rows.length}</Badge>
