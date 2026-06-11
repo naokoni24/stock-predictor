@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { ArrowDownRight, ArrowUpRight, Wallet } from "lucide-react";
+import { AlertTriangle, ArrowDownRight, ArrowUpRight, Wallet } from "lucide-react";
 import { createClient } from "@/lib/supabase-server";
 import HoldingsForm from "./HoldingsForm";
 import AllocationChart from "./AllocationChart";
@@ -7,6 +7,10 @@ import DeleteHoldingButton from "./DeleteHoldingButton";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { cn, getCloseLabel } from "@/lib/utils";
+
+// 損益アラートの閾値（%）
+const LOSS_ALERT_THRESHOLD = -10;
+const GAIN_ALERT_THRESHOLD = 15;
 
 function riskLevel(rsi14: number | null, profitRate: number | null) {
   let score = 30;
@@ -81,6 +85,9 @@ export default async function HoldingsPage({
     };
   });
 
+  const lossAlerts = rows.filter((r) => r.profitRate != null && r.profitRate <= LOSS_ALERT_THRESHOLD);
+  const gainAlerts = rows.filter((r) => r.profitRate != null && r.profitRate >= GAIN_ALERT_THRESHOLD);
+
   const totalMarketValue = rows.reduce((sum, r) => sum + (r.marketValue ?? r.costValue), 0);
   const totalCostValue = rows.reduce((sum, r) => sum + r.costValue, 0);
   const totalProfit = totalMarketValue - totalCostValue;
@@ -92,6 +99,29 @@ export default async function HoldingsPage({
         <h1 className="text-2xl font-bold tracking-tight">ポートフォリオ</h1>
         <p className="text-sm text-muted-foreground mt-1">保有株の評価損益とリスクを確認</p>
       </div>
+
+      {(lossAlerts.length > 0 || gainAlerts.length > 0) && (
+        <div className="flex flex-col gap-2">
+          {lossAlerts.map((h) => (
+            <div
+              key={`loss-${h.id}`}
+              className="flex items-center gap-2 rounded-lg border border-bearish/30 bg-bearish/10 px-4 py-3 text-sm font-medium text-bearish"
+            >
+              <AlertTriangle className="size-4 shrink-0" />
+              {h.stockName ?? h.ticker}が{Math.abs(h.profitRate ?? 0).toFixed(1)}%下落しています（損益アラート）
+            </div>
+          ))}
+          {gainAlerts.map((h) => (
+            <div
+              key={`gain-${h.id}`}
+              className="flex items-center gap-2 rounded-lg border border-bullish/30 bg-bullish/10 px-4 py-3 text-sm font-medium text-bullish"
+            >
+              <AlertTriangle className="size-4 shrink-0" />
+              {h.stockName ?? h.ticker}が{(h.profitRate ?? 0).toFixed(1)}%上昇しています（利益確定の検討を）
+            </div>
+          ))}
+        </div>
+      )}
 
       {rows.length > 0 && (
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
