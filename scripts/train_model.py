@@ -437,13 +437,18 @@ def main():
     ]
     feature_columns = FEATURE_COLUMNS + sector_columns
 
-    # walk-forward検証: 日付でソートし、直近20%をテストデータにする
+    # walk-forward検証: 日付でソートし、学習70% / 検証15% / テスト15%に3分割する
     # (ランダム分割だと未来のデータが学習に混ざり精度が甘く出るため)
+    # 検証データは「しきい値の最適化」に使い、テストデータは最終評価専用とすることで
+    # しきい値最適化に未来のテストデータが漏れ込む問題(評価リーク)を防ぐ。
     dataset = dataset.sort_values("date").reset_index(drop=True)
-    split_idx = int(len(dataset) * 0.8)
-    train_df = dataset.iloc[:split_idx]
-    test_df = dataset.iloc[split_idx:]
+    train_end = int(len(dataset) * 0.7)
+    val_end = int(len(dataset) * 0.85)
+    train_df = dataset.iloc[:train_end]
+    val_df = dataset.iloc[train_end:val_end]
+    test_df = dataset.iloc[val_end:]
     print(f"学習データ: {train_df['date'].min()} 〜 {train_df['date'].max()} ({len(train_df)}行)")
+    print(f"検証データ: {val_df['date'].min()} 〜 {val_df['date'].max()} ({len(val_df)}行)")
     print(f"テストデータ: {test_df['date'].min()} 〜 {test_df['date'].max()} ({len(test_df)}行)")
 
     X_train, y_train = train_df[feature_columns], train_df["label"]
@@ -480,22 +485,34 @@ def main():
         print(f"  {col}: {importance:.3f}")
 
     # predict_probaの出力分布が偏っている(ラベル陽性率が低い)ため、
-    # 全データでの予測確率の分位点を保存し、推論時に0〜1へ較正し直す。
+    # 学習データでの予測確率の分位点を保存し、推論時に0〜1へ較正し直す。
     # これにより「50%」が平均的な銘柄、両端が相対的に強気/弱気な銘柄を表すようになる。
+    # (テスト/検証データを混ぜると評価リークになるため学習データのみを使用)
     import numpy as np
 
-    all_proba = model.predict_proba(dataset[feature_columns])[:, 1]
+    train_proba = model.predict_proba(X_train)[:, 1]
     calibration_percentiles = np.linspace(0, 100, 21)
-    calibration_values = np.percentile(all_proba, calibration_percentiles).tolist()
+    calibration_values = np.percentile(train_proba, calibration_percentiles).tolist()
     print(f"\nスコア較正テーブル(0/25/50/75/100%点): "
           f"{calibration_values[0]:.3f} / {calibration_values[5]:.3f} / "
           f"{calibration_values[10]:.3f} / {calibration_values[15]:.3f} / {calibration_values[-1]:.3f}")
 
+    # しきい値の最適化は検証データで行い、テストデータは最終評価専用にする
+    val_raw_proba = model.predict_proba(val_df[feature_columns])[:, 1]
+    val_scores = calibrate_scores(val_raw_proba, calibration_values)
+    ml_buy_threshold, threshold_results = optimize_ml_buy_threshold(
+        val_scores,
+        val_df["future_return"].to_numpy(),
+    )
+
+    # テストデータ(完全に未使用のデータ)でしきい値の最終評価を行う
     test_raw_proba = model.predict_proba(X_test)[:, 1]
     test_scores = calibrate_scores(test_raw_proba, calibration_values)
-    ml_buy_threshold, threshold_results = optimize_ml_buy_threshold(
-        test_scores,
-        test_df["future_return"].to_numpy(),
+    test_eval = evaluate_threshold(test_scores, test_df["future_return"].to_numpy(), ml_buy_threshold)
+    print(
+        f"\nテストデータでの最終評価(しきい値{ml_buy_threshold:.2f}): "
+        f"trades={test_eval['trades']} win_rate={test_eval['win_rate'] * 100:.1f}% "
+        f"avg_return={test_eval['avg_return'] * 100:.2f}% total_return={test_eval['total_return'] * 100:.1f}%"
     )
     print("\n買い判定しきい値のバックテスト:")
     print(f"{'threshold':>10} {'trades':>7} {'win_rate':>9} {'hit_rate':>9} {'avg_return':>11} {'total_return':>13}")
