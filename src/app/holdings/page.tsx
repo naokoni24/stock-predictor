@@ -179,7 +179,7 @@ export default async function HoldingsPage({
               </Link>
               <p className="text-sm text-muted-foreground mt-0.5">
                 {h.shares}株 / 取得単価 ¥{h.cost_price.toLocaleString()}
-                {h.currentPrice != null && <> / 現在値 ¥{h.currentPrice.toLocaleString()}</>}
+                {h.currentPrice != null && <> / 前日終値 ¥{h.currentPrice.toLocaleString()}</>}
               </p>
             </div>
 

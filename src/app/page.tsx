@@ -144,6 +144,7 @@ function WatchlistRow({ s, signalType }: { s: Row; signalType: string }) {
           </span>
           <ChangeBadge value={s.changePct} />
         </div>
+        <span className="text-[10px] text-muted-foreground">前日終値</span>
         <div className="flex items-center gap-2">
           {s.signal === "buy_candidate" && s.ml_signal === "buy_candidate" ? (
             <Badge className="bg-bullish text-bullish-foreground">本命</Badge>

@@ -112,6 +112,7 @@ export default async function StockDetail({
             {stock?.sector && <p className="text-sm text-muted-foreground mt-0.5">{stock.sector}</p>}
           </div>
           {latest && (
+            <div className="flex flex-col items-end gap-0.5">
             <div className="flex items-baseline gap-2">
               <span className="text-3xl font-bold tabular-nums">¥{latest.close.toLocaleString()}</span>
               {changePct != null && (
@@ -126,6 +127,8 @@ export default async function StockDetail({
                   {changePct.toFixed(2)}%
                 </span>
               )}
+            </div>
+            <span className="text-[10px] text-muted-foreground">前日終値</span>
             </div>
           )}
         </div>
