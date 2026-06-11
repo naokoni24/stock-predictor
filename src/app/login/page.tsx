@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { LineChart } from "lucide-react";
 import { login } from "./actions";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -37,6 +38,12 @@ export default async function LoginPage({
 
             <LoginSubmitButton />
           </form>
+
+          <p className="text-sm text-center text-muted-foreground mt-4">
+            <Link href="/forgot-password" className="font-medium text-foreground hover:underline">
+              パスワードをお忘れですか？
+            </Link>
+          </p>
         </CardContent>
       </Card>
     </div>
