@@ -2,6 +2,7 @@ import Link from "next/link";
 import { ArrowLeft, Brain, TrendingDown, TrendingUp } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import CandlestickChart from "./CandlestickChart";
+import AiScoreHistoryChart from "./AiScoreHistoryChart";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
@@ -29,7 +30,7 @@ export default async function StockDetail({
 }) {
   const { ticker } = await params;
 
-  const [{ data: stock }, { data: prices, error }, { data: signal }] =
+  const [{ data: stock }, { data: prices, error }, { data: signal }, { data: scoreHistory }] =
     await Promise.all([
       supabase.from("stocks").select("name, sector").eq("ticker", ticker).maybeSingle(),
       supabase
@@ -46,6 +47,12 @@ export default async function StockDetail({
         .order("date", { ascending: false })
         .limit(1)
         .maybeSingle(),
+      supabase
+        .from("signals")
+        .select("date, ml_score")
+        .eq("ticker", ticker)
+        .order("date", { ascending: false })
+        .limit(60),
     ]);
 
   const latest = prices?.[prices.length - 1];
@@ -143,6 +150,17 @@ export default async function StockDetail({
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2 flex flex-col gap-6">
           {prices && prices.length > 0 && <CandlestickChart data={prices} />}
+
+          {scoreHistory && scoreHistory.length > 0 && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">AI予測スコアの推移</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <AiScoreHistoryChart data={[...scoreHistory].reverse()} />
+              </CardContent>
+            </Card>
+          )}
 
           {signal && (
             <Card>
