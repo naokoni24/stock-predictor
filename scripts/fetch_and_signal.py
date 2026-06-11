@@ -26,7 +26,7 @@ from supabase import create_client
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "model.pkl")
 
-# バックテストのグリッドサーチで勝率・リターンのバランスが良かった閾値
+# モデルに最適化済みしきい値がない場合の後方互換用デフォルト値
 ML_BUY_THRESHOLD = 0.55
 
 # 無料枠で毎日安定運用するため、重い株価取得・指標計算の対象数を制限する
@@ -104,7 +104,8 @@ def predict_ml(model_bundle, hist, nikkei, sector=None, feature_df=None, news_se
     # ニュースセンチメントで微調整(-1.0〜1.0 を ±NEWS_SENTIMENT_WEIGHT に変換)
     score = score + news_sentiment * NEWS_SENTIMENT_WEIGHT
     score = min(max(score, 0.0), 1.0)
-    signal = "buy_candidate" if score >= ML_BUY_THRESHOLD else "hold"
+    threshold = float(model_bundle.get("ml_buy_threshold", ML_BUY_THRESHOLD))
+    signal = "buy_candidate" if score >= threshold else "hold"
     return signal, round(score, 4)
 
 # 対象銘柄(ティッカー: 名称)。必要に応じて追加・holdingsテーブルと連動させる

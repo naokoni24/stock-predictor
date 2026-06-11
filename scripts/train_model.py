@@ -24,6 +24,10 @@ from sklearn.metrics import accuracy_score, classification_report
 HORIZON_DAYS = 5
 TARGET_RETURN = 0.02
 
+# 買い判定のしきい値候補。再学習時にテストデータのバックテスト成績で最適値を選ぶ。
+THRESHOLD_GRID = [round(x, 3) for x in [0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80]]
+DEFAULT_ML_BUY_THRESHOLD = 0.55
+
 MARKET_INDICES = {
     "nikkei": "^N225",
     "topix": "^TOPX",
@@ -93,6 +97,71 @@ def market_default_value(column: str) -> float:
 def sector_default_value() -> float:
     """業種別データが欠けた時に使う中立値"""
     return 0.0
+
+
+def calibrate_scores(raw_scores, calibration_values: list[float] | None):
+    """学習済みの分位点テーブルを使い、予測確率を0〜1の相対スコアに変換する"""
+    import numpy as np
+
+    if not calibration_values:
+        return raw_scores
+    percentiles = [p / 100 for p in range(0, 101, 5)]
+    return np.interp(raw_scores, calibration_values, percentiles)
+
+
+def evaluate_threshold(scores, future_returns, threshold: float) -> dict:
+    """指定しきい値で買った場合の5営業日後リターンを評価する"""
+    mask = scores >= threshold
+    selected_returns = future_returns[mask]
+    trades = int(mask.sum())
+    if trades == 0:
+        return {
+            "threshold": threshold,
+            "trades": 0,
+            "win_rate": 0.0,
+            "hit_rate": 0.0,
+            "avg_return": 0.0,
+            "total_return": 0.0,
+            "objective": float("-inf"),
+        }
+
+    win_rate = float((selected_returns > 0).mean())
+    hit_rate = float((selected_returns >= TARGET_RETURN).mean())
+    avg_return = float(selected_returns.mean())
+    total_return = float(selected_returns.sum())
+
+    # 平均リターンを主軸に、勝率と+2%以上の的中率を少し加味する。
+    # 極端に取引数が少ないしきい値は optimize_ml_buy_threshold 側で除外する。
+    objective = avg_return + win_rate * 0.005 + hit_rate * 0.005
+    return {
+        "threshold": threshold,
+        "trades": trades,
+        "win_rate": win_rate,
+        "hit_rate": hit_rate,
+        "avg_return": avg_return,
+        "total_return": total_return,
+        "objective": objective,
+    }
+
+
+def optimize_ml_buy_threshold(scores, future_returns) -> tuple[float, list[dict]]:
+    """テストデータで買い判定しきい値を自動最適化する"""
+    min_trades = max(30, int(len(scores) * 0.02))
+    results = [
+        evaluate_threshold(scores, future_returns, threshold)
+        for threshold in THRESHOLD_GRID
+    ]
+    valid_results = [r for r in results if r["trades"] >= min_trades]
+
+    if not valid_results:
+        print(f"しきい値最適化: 取引数が少ないためデフォルト {DEFAULT_ML_BUY_THRESHOLD} を使用")
+        return DEFAULT_ML_BUY_THRESHOLD, results
+
+    best = max(
+        valid_results,
+        key=lambda r: (r["objective"], r["avg_return"], r["win_rate"], r["trades"]),
+    )
+    return float(best["threshold"]), results
 
 
 def build_market_features(symbol: str, prefix: str) -> pd.DataFrame:
@@ -280,14 +349,14 @@ def build_dataset() -> pd.DataFrame:
 
         # N日後の終値の変化率からラベルを作成
         future_close = df["Close"].shift(-HORIZON_DAYS)
-        future_return = future_close / df["Close"] - 1
-        df["label"] = (future_return >= TARGET_RETURN).astype(int)
+        df["future_return"] = future_close / df["Close"] - 1
+        df["label"] = (df["future_return"] >= TARGET_RETURN).astype(int)
 
         # 特徴量・ラベルが揃っている行のみ使用(末尾HORIZON_DAYS行は未来データがないため除外)
-        df = df.dropna(subset=FEATURE_COLUMNS + ["label"])
+        df = df.dropna(subset=FEATURE_COLUMNS + ["future_return", "label"])
         df = df.iloc[:-HORIZON_DAYS] if len(df) > HORIZON_DAYS else df.iloc[0:0]
 
-        df = df[["date"] + FEATURE_COLUMNS + ["label"]].copy()
+        df = df[["date"] + FEATURE_COLUMNS + ["future_return", "label"]].copy()
         df["sector"] = sectors.get(ticker, "不明")
         rows.append(df)
         print(f"{ticker}: {len(df)} rows")
@@ -363,13 +432,37 @@ def main():
           f"{calibration_values[0]:.3f} / {calibration_values[5]:.3f} / "
           f"{calibration_values[10]:.3f} / {calibration_values[15]:.3f} / {calibration_values[-1]:.3f}")
 
+    test_raw_proba = model.predict_proba(X_test)[:, 1]
+    test_scores = calibrate_scores(test_raw_proba, calibration_values)
+    ml_buy_threshold, threshold_results = optimize_ml_buy_threshold(
+        test_scores,
+        test_df["future_return"].to_numpy(),
+    )
+    print("\n買い判定しきい値のバックテスト:")
+    print(f"{'threshold':>10} {'trades':>7} {'win_rate':>9} {'hit_rate':>9} {'avg_return':>11} {'total_return':>13}")
+    for result in threshold_results:
+        print(
+            f"{result['threshold']:>10.2f} {result['trades']:>7} "
+            f"{result['win_rate'] * 100:>8.1f}% {result['hit_rate'] * 100:>8.1f}% "
+            f"{result['avg_return'] * 100:>10.2f}% {result['total_return'] * 100:>12.1f}%"
+        )
+    print(f"採用するML買いしきい値: {ml_buy_threshold:.2f}")
+
     joblib.dump(
         {
             "model": model,
             "features": feature_columns,
             "sector_columns": sector_columns,
-            "feature_version": "sector_relative_strength_v1",
+            "feature_version": "threshold_optimized_v1",
             "score_calibration": calibration_values,
+            "ml_buy_threshold": ml_buy_threshold,
+            "threshold_results": threshold_results,
+            "threshold_optimization": {
+                "horizon_days": HORIZON_DAYS,
+                "target_return": TARGET_RETURN,
+                "grid": THRESHOLD_GRID,
+                "metric": "test_avg_return_with_win_hit_bonus",
+            },
         },
         MODEL_PATH,
     )

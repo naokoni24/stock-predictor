@@ -16,12 +16,14 @@ from fetch_and_signal import TICKERS, calc_rsi, calc_macd, calc_bollinger, get_j
 from train_model import (
     add_sector_relative_features,
     build_features,
+    calibrate_scores,
     get_nikkei_returns,
     FEATURE_COLUMNS,
     MODEL_PATH,
+    THRESHOLD_GRID,
 )
 
-ML_BUY_THRESHOLD = 0.55
+DEFAULT_ML_BUY_THRESHOLD = 0.55
 HOLD_DAYS = 5
 
 
@@ -98,10 +100,11 @@ def simulate_ml(
     features: list[str],
     nikkei: pd.DataFrame,
     require_rule_buy: bool = False,
-    threshold: float = ML_BUY_THRESHOLD,
+    threshold: float = DEFAULT_ML_BUY_THRESHOLD,
     sector_columns: list[str] | None = None,
     sector: str | None = None,
     feature_df: pd.DataFrame | None = None,
+    score_calibration: list[float] | None = None,
 ) -> list[float]:
     """MLモデル: 上昇確率がthreshold以上で翌日始値で購入 -> HOLD_DAYS後の始値で売却
 
@@ -116,7 +119,7 @@ def simulate_ml(
         return []
 
     probs = model.predict_proba(valid[features])[:, 1]
-    df.loc[valid.index, "ml_score"] = probs
+    df.loc[valid.index, "ml_score"] = calibrate_scores(probs, score_calibration)
 
     returns = []
     i = 0
@@ -146,8 +149,8 @@ def evaluate(all_returns: list[float]) -> dict:
     return {
         "trades": len(all_returns),
         "win_rate": len(wins) / len(all_returns) * 100,
-        "avg_return": sum(all_returns) / len(all_returns),
-        "total_return": sum(all_returns),
+        "avg_return": float(sum(all_returns) / len(all_returns)),
+        "total_return": float(sum(all_returns)),
     }
 
 
@@ -160,6 +163,8 @@ def main():
     nikkei = get_nikkei_returns()
     model, features = bundle["model"], bundle["features"]
     sector_columns = bundle.get("sector_columns", [])
+    score_calibration = bundle.get("score_calibration")
+    ml_buy_threshold = float(bundle.get("ml_buy_threshold", DEFAULT_ML_BUY_THRESHOLD))
     jp_sectors = get_jp_sector_map()
     feature_frames = {
         ticker: build_features(hist, nikkei)
@@ -179,9 +184,11 @@ def main():
                 model,
                 features,
                 nikkei,
+                threshold=ml_buy_threshold,
                 sector_columns=sector_columns,
                 sector=sector,
                 feature_df=feature_frames.get(ticker),
+                score_calibration=score_calibration,
             )
         )
         consensus_returns.extend(
@@ -191,24 +198,26 @@ def main():
                 features,
                 nikkei,
                 require_rule_buy=True,
+                threshold=ml_buy_threshold,
                 sector_columns=sector_columns,
                 sector=sector,
                 feature_df=feature_frames.get(ticker),
+                score_calibration=score_calibration,
             )
         )
 
     print("ルールベース (RSI買い<60, 売り>75):")
     print(evaluate(rule_returns))
 
-    print(f"\nMLモデル単独 (上昇確率>={ML_BUY_THRESHOLD}, {HOLD_DAYS}日後に売却):")
+    print(f"\nMLモデル単独 (較正後スコア>={ml_buy_threshold}, {HOLD_DAYS}日後に売却):")
     print(evaluate(ml_returns))
 
-    print(f"\n両シグナル一致 (ルール買い候補 かつ ML上昇確率>={ML_BUY_THRESHOLD}):")
+    print(f"\n両シグナル一致 (ルール買い候補 かつ ML較正後スコア>={ml_buy_threshold}):")
     print(evaluate(consensus_returns))
 
     print("\nML_BUY_THRESHOLD グリッドサーチ:")
     print(f"{'threshold':>10} {'trades':>7} {'win_rate':>9} {'avg_return':>11} {'total_return':>13}")
-    for threshold in [0.45, 0.5, 0.55, 0.6, 0.65, 0.7]:
+    for threshold in THRESHOLD_GRID:
         returns = []
         for ticker, hist in histories.items():
             sector = jp_sectors.get(ticker)
@@ -222,6 +231,7 @@ def main():
                     sector_columns=sector_columns,
                     sector=sector,
                     feature_df=feature_frames.get(ticker),
+                    score_calibration=score_calibration,
                 )
             )
         result = evaluate(returns)
