@@ -15,6 +15,7 @@
 
 import os
 from collections import OrderedDict
+from datetime import datetime, timedelta, timezone
 
 import joblib
 import pandas as pd
@@ -42,7 +43,34 @@ def load_ml_model():
         return None
 
 
-def predict_ml(model_bundle, hist, nikkei, sector=None, feature_df=None) -> tuple[str | None, float | None]:
+# ニュースセンチメントによるスコア補正の重み(±この割合だけml_scoreを増減)
+NEWS_SENTIMENT_WEIGHT = 0.05
+
+
+def get_news_sentiment(sb, tickers: list[str], days: int = 7) -> dict[str, float]:
+    """直近N日分のニュースから銘柄ごとの平均センチメントスコアを取得"""
+    if not tickers:
+        return {}
+
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    res = (
+        sb.table("news")
+        .select("ticker, sentiment_score")
+        .in_("ticker", tickers)
+        .gte("published_at", since)
+        .execute()
+    )
+
+    scores: dict[str, list[float]] = {}
+    for row in res.data or []:
+        if row["sentiment_score"] is None:
+            continue
+        scores.setdefault(row["ticker"], []).append(row["sentiment_score"])
+
+    return {ticker: sum(values) / len(values) for ticker, values in scores.items()}
+
+
+def predict_ml(model_bundle, hist, nikkei, sector=None, feature_df=None, news_sentiment: float = 0.0) -> tuple[str | None, float | None]:
     """株価履歴からML予測(ml_signal/ml_score)を計算"""
     if model_bundle is None:
         return None, None
@@ -62,6 +90,9 @@ def predict_ml(model_bundle, hist, nikkei, sector=None, feature_df=None) -> tupl
     features = pd.DataFrame([row[model_bundle["features"]]])
 
     score = float(model_bundle["model"].predict_proba(features)[0, 1])
+    # ニュースセンチメントで微調整(-1.0〜1.0 を ±NEWS_SENTIMENT_WEIGHT に変換)
+    score = score + news_sentiment * NEWS_SENTIMENT_WEIGHT
+    score = min(max(score, 0.0), 1.0)
     signal = "buy_candidate" if score >= ML_BUY_THRESHOLD else "hold"
     return signal, round(score, 4)
 
@@ -377,6 +408,8 @@ def main():
         }
         feature_frames = add_sector_relative_features(feature_frames, jp_sectors)
 
+    news_sentiment = get_news_sentiment(sb, list(histories.keys()))
+
     for ticker, hist in histories.items():
         # 最新日のシグナルを保存
         latest = hist.iloc[-1]
@@ -388,6 +421,7 @@ def main():
             nikkei,
             jp_sectors.get(ticker),
             feature_frames.get(ticker),
+            news_sentiment.get(ticker, 0.0),
         )
         sb.table("signals").upsert(
             {
