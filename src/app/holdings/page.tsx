@@ -91,17 +91,6 @@ export default async function HoldingsPage({
         <p className="text-sm text-muted-foreground mt-1">保有株の評価損益とリスクを確認</p>
       </div>
 
-      {success === "add" && (
-        <div className="rounded-lg border border-bullish/30 bg-bullish/10 px-4 py-3 text-sm font-medium text-bullish">
-          保有株を追加しました。
-        </div>
-      )}
-      {success === "delete" && (
-        <div className="rounded-lg border border-bullish/30 bg-bullish/10 px-4 py-3 text-sm font-medium text-bullish">
-          保有株を削除しました。
-        </div>
-      )}
-
       {rows.length > 0 && (
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <Card>
@@ -146,6 +135,17 @@ export default async function HoldingsPage({
         <div className="flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-border py-12 text-center">
           <Wallet className="size-6 text-muted-foreground" />
           <p className="text-sm text-muted-foreground">保有株が登録されていません。上のフォームから追加してください。</p>
+        </div>
+      )}
+
+      {success === "add" && (
+        <div className="rounded-lg border border-bullish/30 bg-bullish/10 px-4 py-3 text-sm font-medium text-bullish">
+          保有株を追加しました。
+        </div>
+      )}
+      {success === "delete" && (
+        <div className="rounded-lg border border-bullish/30 bg-bullish/10 px-4 py-3 text-sm font-medium text-bullish">
+          保有株を削除しました。
         </div>
       )}
 
