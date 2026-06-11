@@ -36,7 +36,7 @@ async function fetchTab(signalType: "buy_candidate" | "sell_candidate") {
     .from("signals")
     .select("ticker, date, close, rsi14, signal, score, ml_signal, ml_score, stocks(name, sector)")
     .order("date", { ascending: false })
-    .limit(500);
+    .limit(800);
 
   // 銘柄ごとに最新日のシグナルのみを残す(タブの種類に関わらず最新日を優先)
   const latestByTicker = new Map<string, NonNullable<typeof signals>[number]>();
