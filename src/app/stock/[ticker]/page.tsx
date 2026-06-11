@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { ArrowLeft, Brain, TrendingDown, TrendingUp } from "lucide-react";
+import { ArrowLeft, Brain, ExternalLink, TrendingDown, TrendingUp } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import CandlestickChart from "./CandlestickChart";
 import AiScoreHistoryChart from "./AiScoreHistoryChart";
@@ -141,6 +141,15 @@ export default async function StockDetail({
               <span className="text-muted-foreground text-base font-normal">{ticker}</span>
             </h1>
             {stock?.sector && <p className="text-sm text-muted-foreground mt-0.5">{stock.sector}</p>}
+            <a
+              href={`https://finance.yahoo.co.jp/quote/${ticker}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-1 inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground hover:underline"
+            >
+              <ExternalLink className="size-3" />
+              Yahoo!ファイナンスで詳細を見る
+            </a>
           </div>
           {latest && (
             <div className="flex flex-col items-end gap-0.5">
