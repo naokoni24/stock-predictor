@@ -447,7 +447,8 @@ def main():
                 "score": score,
                 "ml_signal": ml_signal,
                 "ml_score": ml_score,
-            }
+            },
+            on_conflict="ticker,date",
         ).execute()
 
         print(f"{ticker}: signal={signal} score={score} ml_signal={ml_signal} ml_score={ml_score}")
