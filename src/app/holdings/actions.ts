@@ -60,7 +60,7 @@ export async function addHolding(formData: FormData) {
   }
 
   revalidatePath("/holdings");
-  redirect("/holdings");
+  redirect("/holdings?success=add");
 }
 
 export async function deleteHolding(id: number) {
@@ -72,4 +72,5 @@ export async function deleteHolding(id: number) {
   }
 
   revalidatePath("/holdings");
+  redirect("/holdings?success=delete");
 }

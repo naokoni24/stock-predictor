@@ -24,9 +24,9 @@ function riskLevel(rsi14: number | null, profitRate: number | null) {
 export default async function HoldingsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ error?: string }>;
+  searchParams: Promise<{ error?: string; success?: string }>;
 }) {
-  const { error: formError } = await searchParams;
+  const { error: formError, success } = await searchParams;
   const supabase = await createClient();
 
   const { data: holdings, error } = await supabase
@@ -125,6 +125,13 @@ export default async function HoldingsPage({
             </CardContent>
           </Card>
         </div>
+      )}
+
+      {success === "add" && (
+        <p className="text-sm text-bullish">保有株を追加しました。</p>
+      )}
+      {success === "delete" && (
+        <p className="text-sm text-bullish">保有株を削除しました。</p>
       )}
 
       <HoldingsForm error={formError} />
