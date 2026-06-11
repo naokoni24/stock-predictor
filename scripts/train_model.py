@@ -30,6 +30,7 @@ MARKET_INDICES = {
     "usdjpy": "JPY=X",
     "nasdaq": "^IXIC",
     "sox": "^SOX",
+    "vix": "^VIX",
 }
 
 MARKET_METRICS = [
