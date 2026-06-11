@@ -26,6 +26,11 @@ from train_model import (
 DEFAULT_ML_BUY_THRESHOLD = 0.55
 HOLD_DAYS = 5
 
+# train_model.pyの学習/検証/テスト分割(70%/15%/15%)に合わせ、
+# 直近15%(テスト期間相当)のみをout-of-sample評価の対象とする。
+# こうしないと学習に使った期間でバックテストしてしまい、成績が楽観的に出てしまう。
+TEST_SPLIT_RATIO = 0.85
+
 
 def make_signal_param(row, rsi_buy_max: float = 60, rsi_sell_min: float = 75) -> str | None:
     if (
@@ -72,13 +77,16 @@ def load_history() -> dict[str, pd.DataFrame]:
     return histories
 
 
-def simulate_rule(hist: pd.DataFrame) -> list[float]:
-    """ルールベース: buy_candidateで翌日始値で購入 -> sell_candidateで翌日始値で売却"""
+def simulate_rule(hist: pd.DataFrame, start_idx: int = 0) -> list[float]:
+    """ルールベース: buy_candidateで翌日始値で購入 -> sell_candidateで翌日始値で売却
+
+    start_idx以降(out-of-sample期間)のみを評価対象とする。
+    """
     returns = []
     holding = False
     buy_price = None
 
-    for i in range(len(hist) - 1):
+    for i in range(start_idx, len(hist) - 1):
         row = hist.iloc[i]
         signal = make_signal_param(row)
         next_open = hist.iloc[i + 1]["Open"]
@@ -105,11 +113,13 @@ def simulate_ml(
     sector: str | None = None,
     feature_df: pd.DataFrame | None = None,
     score_calibration: list[float] | None = None,
+    start_idx: int = 0,
 ) -> list[float]:
     """MLモデル: 上昇確率がthreshold以上で翌日始値で購入 -> HOLD_DAYS後の始値で売却
 
     require_rule_buy=Trueの場合、ルールベースもbuy_candidateの日のみ購入対象とする
     (両シグナル一致フィルタ)
+    start_idx以降(out-of-sample期間)のみを評価対象とする。
     """
     df = feature_df.copy() if feature_df is not None else build_features(hist, nikkei)
     for col in sector_columns or []:
@@ -122,7 +132,7 @@ def simulate_ml(
     df.loc[valid.index, "ml_score"] = calibrate_scores(probs, score_calibration)
 
     returns = []
-    i = 0
+    i = start_idx
     n = len(hist)
     while i < n - 1 - HOLD_DAYS:
         score = df.iloc[i]["ml_score"]
@@ -177,7 +187,8 @@ def main():
     consensus_returns = []
     for ticker, hist in histories.items():
         sector = jp_sectors.get(ticker)
-        rule_returns.extend(simulate_rule(hist))
+        start_idx = int(len(hist) * TEST_SPLIT_RATIO)
+        rule_returns.extend(simulate_rule(hist, start_idx=start_idx))
         ml_returns.extend(
             simulate_ml(
                 hist,
@@ -189,6 +200,7 @@ def main():
                 sector=sector,
                 feature_df=feature_frames.get(ticker),
                 score_calibration=score_calibration,
+                start_idx=start_idx,
             )
         )
         consensus_returns.extend(
@@ -203,6 +215,7 @@ def main():
                 sector=sector,
                 feature_df=feature_frames.get(ticker),
                 score_calibration=score_calibration,
+                start_idx=start_idx,
             )
         )
 
@@ -221,6 +234,7 @@ def main():
         returns = []
         for ticker, hist in histories.items():
             sector = jp_sectors.get(ticker)
+            start_idx = int(len(hist) * TEST_SPLIT_RATIO)
             returns.extend(
                 simulate_ml(
                     hist,
@@ -232,6 +246,7 @@ def main():
                     sector=sector,
                     feature_df=feature_frames.get(ticker),
                     score_calibration=score_calibration,
+                    start_idx=start_idx,
                 )
             )
         result = evaluate(returns)

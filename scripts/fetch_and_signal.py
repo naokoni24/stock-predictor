@@ -85,7 +85,8 @@ def predict_ml(model_bundle, hist, nikkei, sector=None, feature_df=None, news_se
     for col in model_bundle.get("sector_columns", []):
         row[col] = 1 if col == f"sector_{sector}" else 0
 
-    if row[model_bundle["features"]].isna().any():
+    feature_values = row[model_bundle["features"]]
+    if feature_values.isna().any() or not np.isfinite(feature_values.to_numpy(dtype=float)).all():
         return None, None
 
     features = pd.DataFrame([row[model_bundle["features"]]])
