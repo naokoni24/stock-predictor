@@ -21,7 +21,7 @@ export function SiteSidebar() {
         <div className="flex size-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">
           <LineChart className="size-4" />
         </div>
-        <span className="font-semibold tracking-tight">StockSense AI</span>
+        <span className="font-semibold tracking-tight">AI Stock Signal</span>
       </div>
 
       {NAV_ITEMS.map((item) => {

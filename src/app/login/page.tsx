@@ -19,7 +19,7 @@ export default async function LoginPage({
           <div className="flex size-10 items-center justify-center rounded-xl bg-primary text-primary-foreground">
             <LineChart className="size-5" />
           </div>
-          <CardTitle className="text-xl">StockSense AI にログイン</CardTitle>
+          <CardTitle className="text-xl">AI Stock Signal にログイン</CardTitle>
         </CardHeader>
         <CardContent>
           <form action={login} className="flex flex-col gap-4">
