@@ -25,7 +25,7 @@ export function InactivityLogout() {
       window.addEventListener(event, updateLastActivity, { passive: true })
     );
 
-    const interval = setInterval(async () => {
+    const checkInactivity = async () => {
       const lastActivity = Number(localStorage.getItem(STORAGE_KEY) ?? Date.now());
       if (Date.now() - lastActivity >= INACTIVITY_LIMIT_MS) {
         clearInterval(interval);
@@ -34,13 +34,25 @@ export function InactivityLogout() {
         router.push("/login");
         router.refresh();
       }
-    }, CHECK_INTERVAL_MS);
+    };
+
+    const interval = setInterval(checkInactivity, CHECK_INTERVAL_MS);
+
+    // バックグラウンドタブではsetIntervalが遅延・停止することがあるため、
+    // タブがフォアグラウンドに戻ったタイミングでも即座にチェックする
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        checkInactivity();
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
 
     return () => {
       clearInterval(interval);
       ACTIVITY_EVENTS.forEach((event) =>
         window.removeEventListener(event, updateLastActivity)
       );
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, [router]);
 
