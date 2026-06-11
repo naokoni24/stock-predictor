@@ -222,7 +222,6 @@ export default async function Home() {
               >
                 <ArrowUpRight className="size-4" />
                 買い候補
-                <Badge variant="secondary" className="ml-1">{buy.rows.length}</Badge>
               </TabsTrigger>
               <TabsTrigger
                 value="sell"
@@ -230,7 +229,6 @@ export default async function Home() {
               >
                 <ArrowDownRight className="size-4" />
                 売り候補
-                <Badge variant="secondary" className="ml-1">{sell.rows.length}</Badge>
               </TabsTrigger>
             </TabsList>
 
