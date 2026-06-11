@@ -30,7 +30,7 @@ export default async function StockDetail({
 }) {
   const { ticker } = await params;
 
-  const [{ data: stock }, { data: prices, error }, { data: signal }, { data: scoreHistory }] =
+  const [{ data: stock }, { data: prices, error }, { data: signal }, { data: scoreHistory }, { data: signalHistory }] =
     await Promise.all([
       supabase.from("stocks").select("name, sector").eq("ticker", ticker).maybeSingle(),
       supabase
@@ -53,7 +53,31 @@ export default async function StockDetail({
         .eq("ticker", ticker)
         .order("date", { ascending: false })
         .limit(60),
+      supabase
+        .from("signals")
+        .select("date, ml_signal")
+        .eq("ticker", ticker)
+        .order("date", { ascending: true }),
     ]);
+
+  // AI予測（買い候補）の的中率: シグナル発生から5営業日後に終値が上昇していたか
+  const HIT_RATE_HORIZON = 5;
+  const hitRate = (() => {
+    if (!prices || !signalHistory) return null;
+    const dateIndex = new Map(prices.map((p, i) => [p.date, i]));
+    let wins = 0;
+    let total = 0;
+    for (const s of signalHistory) {
+      if (s.ml_signal !== "buy_candidate") continue;
+      const idx = dateIndex.get(s.date);
+      if (idx == null) continue;
+      const future = prices[idx + HIT_RATE_HORIZON];
+      if (!future) continue;
+      total += 1;
+      if (future.close > prices[idx].close) wins += 1;
+    }
+    return total > 0 ? { rate: (wins / total) * 100, total } : null;
+  })();
 
   const latest = prices?.[prices.length - 1];
   const prev = prices?.[prices.length - 2];
@@ -210,6 +234,22 @@ export default async function StockDetail({
                   {RECOMMENDATION_CONFIG[recommendation].label}
                 </Badge>
               </div>
+
+              {hitRate && (
+                <div className="flex items-center justify-between text-sm">
+                  <span className="text-muted-foreground">
+                    AI買い予測の的中率({HIT_RATE_HORIZON}日後上昇・{hitRate.total}件)
+                  </span>
+                  <span
+                    className={cn(
+                      "font-semibold tabular-nums",
+                      hitRate.rate >= 50 ? "text-bullish" : "text-bearish"
+                    )}
+                  >
+                    {hitRate.rate.toFixed(0)}%
+                  </span>
+                </div>
+              )}
 
               <div className="flex flex-col gap-1.5">
                 <div className="flex items-center justify-between text-sm">
