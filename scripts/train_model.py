@@ -77,6 +77,12 @@ BASE_FEATURE_COLUMNS = [
     "volume_price_momentum_20d",
     "volume_up_pressure_5d",
     "volume_down_pressure_5d",
+    "volatility_20d",
+    "volatility_60d",
+    "atr_ratio_14d",
+    "max_drawdown_20d",
+    "trend_consistency_20d",
+    "return_risk_ratio_20d",
     "relative_strength_5d",
     "price_position_52w",
 ]
@@ -247,6 +253,23 @@ def build_features(hist: pd.DataFrame, nikkei: pd.DataFrame | None = None) -> pd
     df["volume_price_momentum_20d"] = df["return_20d"] * df["volume_ratio"]
     df["volume_up_pressure_5d"] = df["volume_price_momentum_5d"].clip(lower=0)
     df["volume_down_pressure_5d"] = (-df["volume_price_momentum_5d"]).clip(lower=0)
+
+    # 値動きの荒さと安定性。上昇していても乱高下が大きい銘柄を区別する。
+    df["volatility_20d"] = df["return_1d"].rolling(20).std()
+    df["volatility_60d"] = df["return_1d"].rolling(60).std()
+    prev_close = df["Close"].shift(1)
+    true_range = pd.concat(
+        [
+            df["High"] - df["Low"],
+            (df["High"] - prev_close).abs(),
+            (df["Low"] - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    df["atr_ratio_14d"] = true_range.rolling(14).mean() / df["Close"]
+    df["max_drawdown_20d"] = df["Close"] / df["Close"].rolling(20).max() - 1
+    df["trend_consistency_20d"] = (df["return_1d"] > 0).rolling(20).mean()
+    df["return_risk_ratio_20d"] = df["return_20d"] / df["volatility_20d"].replace(0, pd.NA)
 
     # 52週(252営業日)高値・安値の中での現在値の位置(0=安値, 1=高値)
     low_52w = df["Close"].rolling(252, min_periods=60).min()
@@ -469,7 +492,7 @@ def main():
             "model": model,
             "features": feature_columns,
             "sector_columns": sector_columns,
-            "feature_version": "threshold_optimized_v1",
+            "feature_version": "risk_features_v1",
             "score_calibration": calibration_values,
             "ml_buy_threshold": ml_buy_threshold,
             "threshold_results": threshold_results,
