@@ -1,3 +1,5 @@
+"use client";
+
 import { addHolding } from "./actions";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
@@ -12,7 +14,15 @@ export default function HoldingsForm({ error }: { error?: string }) {
         <CardTitle className="text-base">保有株を追加</CardTitle>
       </CardHeader>
       <CardContent>
-        <form action={addHolding} className="flex flex-col gap-4">
+        <form
+          action={addHolding}
+          onSubmit={(e) => {
+            if (!confirm("この内容で保有株を追加しますか？")) {
+              e.preventDefault();
+            }
+          }}
+          className="flex flex-col gap-4"
+        >
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <TickerSearch />
             <div className="flex flex-col gap-1.5">
