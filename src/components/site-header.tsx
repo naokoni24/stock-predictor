@@ -58,7 +58,12 @@ export function SiteHeader({
         <div className="ml-auto flex items-center gap-2 shrink-0">
           <ThemeToggle />
           {isLoggedIn && (
-            <form action={onLogout}>
+            <form
+              action={onLogout}
+              onSubmit={(e) => {
+                if (!confirm("ログアウトしますか？")) e.preventDefault();
+              }}
+            >
               <Button variant="ghost" size="icon" className="size-8" type="submit" aria-label="ログアウト">
                 <LogOut className="size-4" />
               </Button>
