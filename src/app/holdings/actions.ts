@@ -28,6 +28,14 @@ export async function addHolding(formData: FormData) {
 
   const supabase = await createClient();
 
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  if (!user) {
+    redirectWithError("ログインが必要です。");
+  }
+
   // 銘柄マスタになければ追加(name未入力ならtickerをそのまま表示名に)
   const { error: stockError } = await supabase
     .from("stocks")
@@ -44,6 +52,7 @@ export async function addHolding(formData: FormData) {
     ticker,
     shares,
     cost_price: costPrice,
+    user_id: user.id,
   });
 
   if (holdingError) {
