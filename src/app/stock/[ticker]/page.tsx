@@ -5,7 +5,7 @@ import CandlestickChart from "./CandlestickChart";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
-import { cn } from "@/lib/utils";
+import { cn, getCloseLabel } from "@/lib/utils";
 
 const SIGNAL_LABEL: Record<string, string> = {
   buy_candidate: "買い候補",
@@ -128,7 +128,7 @@ export default async function StockDetail({
                   </span>
                 )}
               </div>
-              <span className="text-[10px] text-muted-foreground">前日終値</span>
+              <span className="text-[10px] text-muted-foreground">{getCloseLabel(latest.date)}</span>
             </div>
           )}
         </div>

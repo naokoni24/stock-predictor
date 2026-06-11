@@ -6,7 +6,7 @@ import AllocationChart from "./AllocationChart";
 import DeleteHoldingButton from "./DeleteHoldingButton";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { cn } from "@/lib/utils";
+import { cn, getCloseLabel } from "@/lib/utils";
 
 function riskLevel(rsi14: number | null, profitRate: number | null) {
   let score = 30;
@@ -48,11 +48,11 @@ export default async function HoldingsPage({
   // 各銘柄の最新シグナルのみ残す
   const latestByTicker = new Map<
     string,
-    { close: number; signal: string | null; rsi14: number | null }
+    { close: number; date: string; signal: string | null; rsi14: number | null }
   >();
   for (const s of latestSignals ?? []) {
     if (!latestByTicker.has(s.ticker)) {
-      latestByTicker.set(s.ticker, { close: s.close, signal: s.signal, rsi14: s.rsi14 });
+      latestByTicker.set(s.ticker, { close: s.close, date: s.date, signal: s.signal, rsi14: s.rsi14 });
     }
   }
 
@@ -71,6 +71,7 @@ export default async function HoldingsPage({
       ...h,
       stockName,
       currentPrice,
+      currentPriceDate: latest?.date ?? null,
       profitRate,
       profitAmount,
       marketValue,
@@ -179,7 +180,9 @@ export default async function HoldingsPage({
               </Link>
               <p className="text-sm text-muted-foreground mt-0.5">
                 {h.shares}株 / 取得単価 ¥{h.cost_price.toLocaleString()}
-                {h.currentPrice != null && <> / 前日終値 ¥{h.currentPrice.toLocaleString()}</>}
+                {h.currentPrice != null && (
+                  <> / {h.currentPriceDate ? getCloseLabel(h.currentPriceDate) : "前日終値"} ¥{h.currentPrice.toLocaleString()}</>
+                )}
               </p>
             </div>
 
