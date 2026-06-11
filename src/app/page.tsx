@@ -209,7 +209,8 @@ export default async function Home() {
     .at(-1);
 
   const lastUpdatedLabel = latestDate
-    ? `最終更新: ${new Date(latestDate).toLocaleDateString("ja-JP", {
+    ? `最終更新: ${new Date(`${latestDate}T00:00:00+09:00`).toLocaleDateString("ja-JP", {
+        timeZone: "Asia/Tokyo",
         month: "long",
         day: "numeric",
       })} 16:30時点`
