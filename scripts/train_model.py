@@ -350,12 +350,25 @@ def main():
     ):
         print(f"  {col}: {importance:.3f}")
 
+    # predict_probaの出力分布が偏っている(ラベル陽性率が低い)ため、
+    # 全データでの予測確率の分位点を保存し、推論時に0〜1へ較正し直す。
+    # これにより「50%」が平均的な銘柄、両端が相対的に強気/弱気な銘柄を表すようになる。
+    import numpy as np
+
+    all_proba = model.predict_proba(dataset[feature_columns])[:, 1]
+    calibration_percentiles = np.linspace(0, 100, 21)
+    calibration_values = np.percentile(all_proba, calibration_percentiles).tolist()
+    print(f"\nスコア較正テーブル(0/25/50/75/100%点): "
+          f"{calibration_values[0]:.3f} / {calibration_values[5]:.3f} / "
+          f"{calibration_values[10]:.3f} / {calibration_values[15]:.3f} / {calibration_values[-1]:.3f}")
+
     joblib.dump(
         {
             "model": model,
             "features": feature_columns,
             "sector_columns": sector_columns,
             "feature_version": "sector_relative_strength_v1",
+            "score_calibration": calibration_values,
         },
         MODEL_PATH,
     )

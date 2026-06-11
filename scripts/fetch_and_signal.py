@@ -18,6 +18,7 @@ from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 
 import joblib
+import numpy as np
 import pandas as pd
 import yfinance as yf
 from yfinance.screener.query import EquityQuery
@@ -89,7 +90,17 @@ def predict_ml(model_bundle, hist, nikkei, sector=None, feature_df=None, news_se
 
     features = pd.DataFrame([row[model_bundle["features"]]])
 
-    score = float(model_bundle["model"].predict_proba(features)[0, 1])
+    raw_score = float(model_bundle["model"].predict_proba(features)[0, 1])
+
+    # 学習データ全体での予測確率の分布が偏っているため、分位点テーブルで0〜1に較正する。
+    # 50%が「平均的な銘柄」、両端が相対的に強気/弱気な銘柄を表す。
+    calibration = model_bundle.get("score_calibration")
+    if calibration:
+        percentiles = [p / 100 for p in range(0, 101, 5)]
+        score = float(np.interp(raw_score, calibration, percentiles))
+    else:
+        score = raw_score
+
     # ニュースセンチメントで微調整(-1.0〜1.0 を ±NEWS_SENTIMENT_WEIGHT に変換)
     score = score + news_sentiment * NEWS_SENTIMENT_WEIGHT
     score = min(max(score, 0.0), 1.0)
