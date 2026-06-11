@@ -113,6 +113,7 @@ export default async function StockDetail({
           </div>
           {latest && (
             <div className="flex flex-col items-end gap-0.5">
+              <span className="text-[10px] text-muted-foreground">{getCloseLabel(latest.date)}</span>
               <div className="flex items-baseline gap-2">
                 <span className="text-3xl font-bold tabular-nums">¥{latest.close.toLocaleString()}</span>
                 {changePct != null && (
@@ -128,7 +129,6 @@ export default async function StockDetail({
                   </span>
                 )}
               </div>
-              <span className="text-[10px] text-muted-foreground">{getCloseLabel(latest.date)}</span>
             </div>
           )}
         </div>

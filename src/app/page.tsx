@@ -156,10 +156,10 @@ function WatchlistRow({ s, signalType }: { s: Row; signalType: string }) {
       <div className="flex flex-col items-end gap-1.5 shrink-0">
         <div className="flex items-end gap-3">
           <div className="flex flex-col items-end gap-0.5">
+            <span className="text-[10px] text-muted-foreground">{getCloseLabel(s.date)}</span>
             <span className="font-semibold tabular-nums">
               {s.close != null ? `¥${s.close.toLocaleString()}` : "ー"}
             </span>
-            <span className="text-[10px] text-muted-foreground">{getCloseLabel(s.date)}</span>
           </div>
           <ChangeBadge value={s.changePct} />
         </div>
