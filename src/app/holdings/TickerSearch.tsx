@@ -17,7 +17,6 @@ export default function TickerSearch() {
 
   useEffect(() => {
     if (selected || query.trim().length < 1) {
-      setOptions([]);
       return;
     }
 
@@ -44,6 +43,8 @@ export default function TickerSearch() {
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
+  const visibleOptions = selected || query.trim().length < 1 ? [] : options;
+
   return (
     <div ref={containerRef} className="flex flex-col gap-1.5 relative">
       <Label htmlFor="stock-search">銘柄名で検索</Label>
@@ -64,9 +65,9 @@ export default function TickerSearch() {
         />
       </div>
 
-      {open && options.length > 0 && (
+      {open && visibleOptions.length > 0 && (
         <div className="absolute top-full left-0 right-0 mt-1 z-10 rounded-lg border border-border bg-popover shadow-md max-h-56 overflow-y-auto">
-          {options.map((o) => (
+          {visibleOptions.map((o) => (
             <button
               key={o.ticker}
               type="button"
