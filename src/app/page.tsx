@@ -61,12 +61,14 @@ async function fetchTab(signalType: "buy_candidate" | "sell_candidate") {
 
   const tickers = rows.map((r) => r.ticker);
   if (tickers.length) {
+    const since = new Date();
+    since.setDate(since.getDate() - 10);
     const { data: prices } = await supabase
       .from("prices")
       .select("ticker, date, close")
       .in("ticker", tickers)
-      .order("date", { ascending: false })
-      .limit(tickers.length * 2);
+      .gte("date", since.toISOString().slice(0, 10))
+      .order("date", { ascending: false });
 
     const byTicker = new Map<string, number[]>();
     for (const p of prices ?? []) {
