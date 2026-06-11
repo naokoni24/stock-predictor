@@ -55,7 +55,7 @@ export default async function RootLayout({
           <div className="flex min-h-svh">
             {user && <SiteSidebar />}
             <div className="flex min-w-0 flex-1 flex-col">
-              {user && <SiteHeader isLoggedIn onLogout={logout} />}
+              {user && <SiteHeader onLogout={logout} />}
               <main className="flex-1 mx-auto w-full max-w-6xl px-4 py-6 md:px-8 md:py-8">
                 {children}
               </main>

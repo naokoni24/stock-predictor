@@ -15,10 +15,8 @@ const NAV_ITEMS = [
 ];
 
 export function SiteHeader({
-  isLoggedIn,
   onLogout,
 }: {
-  isLoggedIn: boolean;
   onLogout: () => Promise<void>;
 }) {
   const pathname = usePathname();
@@ -57,18 +55,16 @@ export function SiteHeader({
 
         <div className="ml-auto flex items-center gap-1 shrink-0">
           <ThemeToggle />
-          {isLoggedIn && (
-            <form
-              action={onLogout}
-              onSubmit={(e) => {
-                if (!confirm("ログアウトしますか？")) e.preventDefault();
-              }}
-            >
-              <Button variant="ghost" size="icon" className="size-8" type="submit" aria-label="ログアウト">
-                <LogOut className="size-4" />
-              </Button>
-            </form>
-          )}
+          <form
+            action={onLogout}
+            onSubmit={(e) => {
+              if (!confirm("ログアウトしますか？")) e.preventDefault();
+            }}
+          >
+            <Button variant="ghost" size="icon" className="size-8" type="submit" aria-label="ログアウト">
+              <LogOut className="size-4" />
+            </Button>
+          </form>
         </div>
       </div>
     </header>
