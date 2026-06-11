@@ -132,7 +132,8 @@ function AiScoreBar({ score }: { score: number | null | undefined }) {
 function aiSentimentLabel(score: number): string {
   if (score < 0.2) return "非常に弱気";
   if (score < 0.35) return "弱気";
-  return "やや弱気";
+  if (score < 0.45) return "やや弱気";
+  return "中立";
 }
 
 function WatchlistRow({ s, signalType }: { s: Row; signalType: string }) {
@@ -170,7 +171,12 @@ function WatchlistRow({ s, signalType }: { s: Row; signalType: string }) {
           {signalType === "buy_candidate" && <AiScoreBar score={s.ml_score} />}
         </div>
         {signalType === "buy_candidate" && s.ml_signal !== "buy_candidate" && s.ml_score != null && s.ml_score < 0.5 && (
-          <span className="text-[10px] text-bearish text-right">
+          <span
+            className={cn(
+              "text-[10px] text-right",
+              s.ml_score < 0.45 ? "text-bearish" : "text-muted-foreground"
+            )}
+          >
             ※テクニカルは買いですが、AI予測は{aiSentimentLabel(s.ml_score)}です
           </span>
         )}
