@@ -145,9 +145,9 @@ export default async function StockDetail({
               href={`https://finance.yahoo.co.jp/quote/${ticker}`}
               target="_blank"
               rel="noopener noreferrer"
-              className="mt-1 inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground hover:underline"
+              className="mt-2 inline-flex items-center gap-1 rounded-md border border-border bg-card px-2.5 py-1 text-xs font-medium text-foreground transition-colors hover:bg-accent"
             >
-              <ExternalLink className="size-3" />
+              <ExternalLink className="size-3.5" />
               Yahoo!ファイナンスで詳細を見る
             </a>
           </div>
