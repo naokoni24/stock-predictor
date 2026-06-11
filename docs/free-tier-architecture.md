@@ -131,7 +131,7 @@ GitHub Actionsのログに以下を出す。
 追加済みの市場環境データ:
 
 - 日経平均: `^N225`
-- TOPIX: `^TOPX`
+- TOPIX: `^TOPX`、取得できない場合はTOPIX連動ETFの `1306.T`
 - ドル円: `JPY=X`
 - NASDAQ: `^IXIC`
 - SOX指数: `^SOX`

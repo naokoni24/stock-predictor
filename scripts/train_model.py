@@ -29,12 +29,13 @@ THRESHOLD_GRID = [round(x, 3) for x in [0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70
 DEFAULT_ML_BUY_THRESHOLD = 0.55
 
 MARKET_INDICES = {
-    "nikkei": "^N225",
-    "topix": "^TOPX",
-    "usdjpy": "JPY=X",
-    "nasdaq": "^IXIC",
-    "sox": "^SOX",
-    "vix": "^VIX",
+    "nikkei": ["^N225"],
+    # yfinanceではTOPIX指数が空になることがあるため、無料で取得できるTOPIX連動ETFを代替に使う。
+    "topix": ["^TOPX", "1306.T"],
+    "usdjpy": ["JPY=X"],
+    "nasdaq": ["^IXIC"],
+    "sox": ["^SOX"],
+    "vix": ["^VIX"],
 }
 
 MARKET_METRICS = [
@@ -164,13 +165,28 @@ def optimize_ml_buy_threshold(scores, future_returns) -> tuple[float, list[dict]
     return float(best["threshold"]), results
 
 
-def build_market_features(symbol: str, prefix: str) -> pd.DataFrame:
+def build_market_features(symbols: str | list[str], prefix: str) -> pd.DataFrame:
     """市場指数・為替データを同じ形式の特徴量へ変換"""
-    hist = yf.Ticker(symbol).history(period="2y")
-    if hist.empty:
+    if isinstance(symbols, str):
+        symbols = [symbols]
+
+    hist = pd.DataFrame()
+    used_symbol = None
+    for symbol in symbols:
+        candidate = yf.Ticker(symbol).history(period="2y")
+        if not candidate.empty:
+            hist = candidate
+            used_symbol = symbol
+            if symbol != symbols[0]:
+                print(f"market data fallback: {prefix} {symbols[0]} -> {symbol}")
+            break
         print(f"market data empty: {symbol}")
+
+    if hist.empty:
+        print(f"market data unavailable: {prefix}")
         return pd.DataFrame(columns=["date"] + [f"{prefix}_{m}" for m in MARKET_METRICS])
 
+    print(f"market data loaded: {prefix}={used_symbol}")
     hist = hist.reset_index()
     hist["date"] = pd.to_datetime(hist["Date"]).dt.date
     hist[f"{prefix}_return_1d"] = hist["Close"] / hist["Close"].shift(1) - 1
