@@ -376,6 +376,14 @@ def main():
         hist = hist.reset_index()
         hist["date"] = hist["Date"].dt.date
 
+        # yfinanceが当日分の未確定(寄り付き前)データを返すことがあるため、
+        # 日本時間の本日より先の日付の行は除外する
+        today_jst = datetime.now(timezone(timedelta(hours=9))).date()
+        hist = hist[hist["date"] <= today_jst].reset_index(drop=True)
+        if hist.empty:
+            print(f"skip {ticker}: no valid data")
+            continue
+
         hist["sma25"] = hist["Close"].rolling(25).mean()
         hist["sma75"] = hist["Close"].rolling(75).mean()
         hist["rsi14"] = calc_rsi(hist["Close"], 14)
