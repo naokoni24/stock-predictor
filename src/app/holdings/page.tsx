@@ -2,6 +2,7 @@ import Link from "next/link";
 import { ArrowDownRight, ArrowUpRight, Wallet } from "lucide-react";
 import { createClient } from "@/lib/supabase-server";
 import HoldingsForm from "./HoldingsForm";
+import AllocationChart from "./AllocationChart";
 import DeleteHoldingButton from "./DeleteHoldingButton";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -125,6 +126,22 @@ export default async function HoldingsPage({
             </CardContent>
           </Card>
         </div>
+      )}
+
+      {rows.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">資産配分</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <AllocationChart
+              data={rows.map((h) => ({
+                name: h.stockName ?? h.ticker,
+                value: h.marketValue ?? h.costValue,
+              }))}
+            />
+          </CardContent>
+        </Card>
       )}
 
       <HoldingsForm error={formError} />
