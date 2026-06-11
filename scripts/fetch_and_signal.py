@@ -14,6 +14,8 @@
 """
 
 import os
+from collections import OrderedDict
+
 import joblib
 import pandas as pd
 import yfinance as yf
@@ -24,6 +26,11 @@ MODEL_PATH = os.path.join(os.path.dirname(__file__), "model.pkl")
 
 # バックテストのグリッドサーチで勝率・リターンのバランスが良かった閾値
 ML_BUY_THRESHOLD = 0.55
+
+# 無料枠で毎日安定運用するため、重い株価取得・指標計算の対象数を制限する
+MAX_DAILY_TICKERS = 150
+SCREENER_SIZE = 50
+PREVIOUS_SIGNAL_LIMIT = 50
 
 
 def load_ml_model():
@@ -125,30 +132,112 @@ def calc_bollinger(close: pd.Series, period: int = 20, num_std: float = 2.0) -> 
 JPX_LIST_URL = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls"
 
 
-def get_jp_name_map() -> dict[str, str]:
-    """JPX上場銘柄一覧から証券コード→日本語銘柄名のマップを取得"""
+def get_jpx_maps() -> tuple[dict[str, str], dict[str, str]]:
+    """JPX上場銘柄一覧から銘柄名・業種のマップを取得"""
     try:
         df = pd.read_excel(JPX_LIST_URL)
-        return {
+        name_map = {
             f"{str(row['コード']).strip()}.T": str(row['銘柄名']).strip()
             for _, row in df.iterrows()
         }
+        sector_map = {
+            f"{str(row['コード']).strip()}.T": str(row['33業種区分']).strip()
+            for _, row in df.iterrows()
+        }
+        return name_map, sector_map
     except Exception as e:
         print(f"failed to load JPX list: {e}")
-        return {}
+        return {}, {}
+
+
+def get_jp_name_map() -> dict[str, str]:
+    """JPX上場銘柄一覧から証券コード→日本語銘柄名のマップを取得"""
+    names, _ = get_jpx_maps()
+    return names
 
 
 def get_jp_sector_map() -> dict[str, str]:
     """JPX上場銘柄一覧から証券コード→業種(33業種区分)のマップを取得"""
+    _, sectors = get_jpx_maps()
+    return sectors
+
+
+def get_holdings_tickers(sb) -> dict[str, str]:
+    """保有株は必ず日次分析に含める"""
     try:
-        df = pd.read_excel(JPX_LIST_URL)
-        return {
-            f"{str(row['コード']).strip()}.T": str(row['33業種区分']).strip()
-            for _, row in df.iterrows()
-        }
+        res = sb.table("holdings").select("ticker, stocks(name)").execute()
+        result = {}
+        for row in res.data or []:
+            ticker = row.get("ticker")
+            if not ticker:
+                continue
+            stock = row.get("stocks")
+            if isinstance(stock, list):
+                stock = stock[0] if stock else None
+            result[ticker] = (stock or {}).get("name") or ticker
+        return result
     except Exception as e:
-        print(f"failed to load JPX sector list: {e}")
+        print(f"failed to load holdings tickers: {e}")
         return {}
+
+
+def get_previous_signal_tickers(sb, limit: int = PREVIOUS_SIGNAL_LIMIT) -> dict[str, str]:
+    """前回強かった/弱かった銘柄は継続監視する"""
+    try:
+        res = (
+            sb.table("signals")
+            .select("ticker, date, signal, stocks(name)")
+            .in_("signal", ["buy_candidate", "sell_candidate"])
+            .order("date", desc=True)
+            .limit(limit * 3)
+            .execute()
+        )
+        result = {}
+        for row in res.data or []:
+            ticker = row.get("ticker")
+            if not ticker or ticker in result:
+                continue
+            stock = row.get("stocks")
+            if isinstance(stock, list):
+                stock = stock[0] if stock else None
+            result[ticker] = (stock or {}).get("name") or ticker
+            if len(result) >= limit:
+                break
+        return result
+    except Exception as e:
+        print(f"failed to load previous signal tickers: {e}")
+        return {}
+
+
+def add_candidates(target: OrderedDict[str, str], candidates: dict[str, str], names: dict[str, str], reason: str):
+    """優先度順に候補銘柄を追加する。既存候補は上書きしない"""
+    before = len(target)
+    for ticker, name in candidates.items():
+        if len(target) >= MAX_DAILY_TICKERS:
+            break
+        if ticker not in target:
+            target[ticker] = names.get(ticker, name or ticker)
+    print(f"{reason}: added {len(target) - before}, total {len(target)}")
+
+
+def select_daily_tickers(sb, jp_names: dict[str, str]) -> dict[str, str]:
+    """広い候補群から、無料枠で毎日処理できる銘柄だけを優先度順に選ぶ"""
+    selected: OrderedDict[str, str] = OrderedDict()
+
+    add_candidates(selected, TICKERS, jp_names, "fixed tickers")
+    add_candidates(selected, get_holdings_tickers(sb), jp_names, "holdings")
+
+    previous_signal_tickers = get_previous_signal_tickers(sb)
+    add_candidates(selected, previous_signal_tickers, jp_names, "previous signals")
+
+    screener_tickers = get_screener_tickers(size=SCREENER_SIZE)
+    print(f"screener found {len(screener_tickers)} tickers")
+    add_candidates(selected, screener_tickers, jp_names, "screener")
+
+    # 優先候補で上限に満たない日は、JPX上場銘柄一覧から補充して探索範囲を広げる
+    add_candidates(selected, jp_names, jp_names, "jpx fallback")
+
+    return dict(selected)
 
 
 def get_screener_tickers(size: int = 50) -> dict[str, str]:
@@ -234,14 +323,9 @@ def main():
         from train_model import get_nikkei_returns
         nikkei = get_nikkei_returns()
 
-    # 主力銘柄 + スクリーニング結果(値上がり/値下がり上位)を結合
-    all_tickers = dict(TICKERS)
-    screener_tickers = get_screener_tickers()
-    print(f"screener found {len(screener_tickers)} tickers")
-    jp_names = get_jp_name_map()
-    jp_sectors = get_jp_sector_map()
-    for t, n in screener_tickers.items():
-        all_tickers.setdefault(t, jp_names.get(t, n))
+    jp_names, jp_sectors = get_jpx_maps()
+    all_tickers = select_daily_tickers(sb, jp_names)
+    print(f"daily analysis target: {len(all_tickers)} / max {MAX_DAILY_TICKERS}")
 
     # 銘柄マスタをupsert
     sb.table("stocks").upsert(
