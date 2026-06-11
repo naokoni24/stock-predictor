@@ -4,7 +4,7 @@ import { login } from "./actions";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
-import { LoginSubmitButton } from "@/components/login-submit-button";
+import { SubmitButton } from "@/components/login-submit-button";
 
 export default async function LoginPage({
   searchParams,
@@ -36,7 +36,7 @@ export default async function LoginPage({
               <Input id="password" name="password" type="password" required />
             </div>
 
-            <LoginSubmitButton />
+            <SubmitButton label="ログイン" pendingLabel="ログイン中..." />
           </form>
 
           <p className="text-sm text-center text-muted-foreground mt-4">

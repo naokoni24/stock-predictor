@@ -4,7 +4,13 @@ import { useFormStatus } from "react-dom";
 import { Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
-export function LoginSubmitButton() {
+export function SubmitButton({
+  label,
+  pendingLabel,
+}: {
+  label: string;
+  pendingLabel: string;
+}) {
   const { pending } = useFormStatus();
 
   return (
@@ -12,10 +18,10 @@ export function LoginSubmitButton() {
       {pending ? (
         <>
           <Loader2 className="size-4 animate-spin" />
-          ログイン中...
+          {pendingLabel}
         </>
       ) : (
-        "ログイン"
+        label
       )}
     </Button>
   );

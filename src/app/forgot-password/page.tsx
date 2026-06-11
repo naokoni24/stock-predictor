@@ -4,7 +4,7 @@ import { sendResetEmail } from "./actions";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
-import { Button } from "@/components/ui/button";
+import { SubmitButton } from "@/components/login-submit-button";
 
 export default async function ForgotPasswordPage({
   searchParams,
@@ -36,9 +36,7 @@ export default async function ForgotPasswordPage({
                 <Input id="email" name="email" type="email" required />
               </div>
 
-              <Button type="submit" className="mt-2">
-                リセットメールを送信
-              </Button>
+              <SubmitButton label="リセットメールを送信" pendingLabel="送信中..." />
             </form>
           )}
 
