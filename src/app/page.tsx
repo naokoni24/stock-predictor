@@ -203,6 +203,18 @@ export default async function Home() {
 
   const topPick = buy.rows[0];
 
+  const latestDate = [...buy.rows, ...sell.rows]
+    .map((r) => r.date)
+    .sort()
+    .at(-1);
+
+  const lastUpdatedLabel = latestDate
+    ? `最終更新: ${new Date(latestDate).toLocaleDateString("ja-JP", {
+        month: "long",
+        day: "numeric",
+      })} 16:30時点`
+    : null;
+
   return (
     <div className="flex flex-col gap-6">
       <div>
@@ -210,6 +222,9 @@ export default async function Home() {
         <p className="text-sm text-muted-foreground mt-1">
           AIモデルとテクニカル指標に基づく売買候補ウォッチリスト
         </p>
+        {lastUpdatedLabel && (
+          <p className="text-xs text-muted-foreground mt-1">{lastUpdatedLabel}</p>
+        )}
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
