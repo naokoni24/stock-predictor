@@ -3,4 +3,5 @@ pandas
 supabase
 xlrd
 scikit-learn
+lightgbm
 joblib
