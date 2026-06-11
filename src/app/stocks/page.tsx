@@ -33,7 +33,9 @@ export default async function StocksPage() {
     <div className="flex flex-col gap-6">
       <div>
         <h1 className="text-2xl font-bold tracking-tight">登録銘柄一覧</h1>
-        <p className="text-sm text-muted-foreground mt-1">監視対象銘柄を検索して詳細を確認</p>
+        <p className="text-sm text-muted-foreground mt-1">
+          監視対象銘柄を検索して詳細を確認(全{rows.length}銘柄)
+        </p>
       </div>
 
       {error && <p className="text-bearish text-sm">データ取得エラー: {error.message}</p>}
