@@ -193,6 +193,23 @@ GitHub Actionsのログに以下を出す。
 
 新しい外部APIは使わず、既存のyfinance株価データだけで計算する。
 
+## ローソク足・日中需給特徴量
+
+終値だけでは、寄り付き後に買われた銘柄なのか、上値を抑えられて引けた銘柄なのかが分かりにくい。
+そこで、OHLCから日中の値動きとローソク足の形を特徴量化する。
+
+追加済みの特徴量:
+
+- `open_gap_1d`
+- `intraday_return`
+- `daily_range_ratio`
+- `close_location`
+- `upper_shadow_ratio`
+- `lower_shadow_ratio`
+- `range_expansion_20d`
+
+既存のyfinance OHLCデータだけで計算するため、追加API費用はかからない。
+
 ## ML買いしきい値の自動最適化
 
 固定値だけで買い候補を判定すると、市場環境やモデル更新後のスコア分布に合わないことがある。

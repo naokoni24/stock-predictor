@@ -13,6 +13,7 @@ fetch_and_signal.py から読み込んで日次推論に利用する。
 """
 
 import joblib
+import numpy as np
 import pandas as pd
 import yfinance as yf
 
@@ -83,6 +84,13 @@ BASE_FEATURE_COLUMNS = [
     "max_drawdown_20d",
     "trend_consistency_20d",
     "return_risk_ratio_20d",
+    "open_gap_1d",
+    "intraday_return",
+    "daily_range_ratio",
+    "close_location",
+    "upper_shadow_ratio",
+    "lower_shadow_ratio",
+    "range_expansion_20d",
     "relative_strength_5d",
     "price_position_52w",
 ]
@@ -269,7 +277,19 @@ def build_features(hist: pd.DataFrame, nikkei: pd.DataFrame | None = None) -> pd
     df["atr_ratio_14d"] = true_range.rolling(14).mean() / df["Close"]
     df["max_drawdown_20d"] = df["Close"] / df["Close"].rolling(20).max() - 1
     df["trend_consistency_20d"] = (df["return_1d"] > 0).rolling(20).mean()
-    df["return_risk_ratio_20d"] = df["return_20d"] / df["volatility_20d"].replace(0, pd.NA)
+    df["return_risk_ratio_20d"] = df["return_20d"] / df["volatility_20d"].replace(0, np.nan)
+
+    # ローソク足・日中需給の特徴量。寄り付き後に買われたか、上値を抑えられたかを見る。
+    daily_range = (df["High"] - df["Low"]).replace(0, np.nan)
+    candle_body_high = df[["Open", "Close"]].max(axis=1)
+    candle_body_low = df[["Open", "Close"]].min(axis=1)
+    df["open_gap_1d"] = df["Open"] / prev_close - 1
+    df["intraday_return"] = df["Close"] / df["Open"] - 1
+    df["daily_range_ratio"] = daily_range / df["Close"]
+    df["close_location"] = (df["Close"] - df["Low"]) / daily_range
+    df["upper_shadow_ratio"] = (df["High"] - candle_body_high) / daily_range
+    df["lower_shadow_ratio"] = (candle_body_low - df["Low"]) / daily_range
+    df["range_expansion_20d"] = df["daily_range_ratio"] / df["daily_range_ratio"].rolling(20).mean()
 
     # 52週(252営業日)高値・安値の中での現在値の位置(0=安値, 1=高値)
     low_52w = df["Close"].rolling(252, min_periods=60).min()
@@ -492,7 +512,7 @@ def main():
             "model": model,
             "features": feature_columns,
             "sector_columns": sector_columns,
-            "feature_version": "risk_features_v1",
+            "feature_version": "candlestick_features_v1",
             "score_calibration": calibration_values,
             "ml_buy_threshold": ml_buy_threshold,
             "threshold_results": threshold_results,
