@@ -1,0 +1,47 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import { usePathname, useSearchParams } from "next/navigation";
+import { Loader2 } from "lucide-react";
+
+export function NavigationProgress() {
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const [loading, setLoading] = useState(false);
+
+  // 画面遷移先のリンクがクリックされたら表示を開始
+  useEffect(() => {
+    const handleClick = (e: MouseEvent) => {
+      if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+
+      const anchor = (e.target as HTMLElement)?.closest("a");
+      if (!anchor) return;
+
+      const href = anchor.getAttribute("href");
+      if (!href || !href.startsWith("/") || anchor.target === "_blank") return;
+
+      const currentUrl = pathname + (searchParams.toString() ? `?${searchParams.toString()}` : "");
+      if (href === currentUrl) return;
+
+      setLoading(true);
+    };
+
+    document.addEventListener("click", handleClick);
+    return () => document.removeEventListener("click", handleClick);
+  }, [pathname, searchParams]);
+
+  // 遷移先のパスに変わったら表示を消す
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setLoading(false);
+  }, [pathname, searchParams]);
+
+  if (!loading) return null;
+
+  return (
+    <div className="fixed inset-x-0 top-0 z-50 flex items-center justify-center gap-2 bg-primary py-1.5 text-xs font-medium text-primary-foreground">
+      <Loader2 className="size-3.5 animate-spin" />
+      読み込み中...
+    </div>
+  );
+}

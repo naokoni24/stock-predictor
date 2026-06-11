@@ -7,6 +7,8 @@ import { ThemeProvider } from "@/components/theme-provider";
 import { SiteSidebar } from "@/components/site-sidebar";
 import { SiteHeader } from "@/components/site-header";
 import { InactivityLogout } from "@/components/inactivity-logout";
+import { Suspense } from "react";
+import { NavigationProgress } from "@/components/navigation-progress";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -54,6 +56,9 @@ export default async function RootLayout({
           disableTransitionOnChange
         >
           {user && <InactivityLogout />}
+          <Suspense fallback={null}>
+            <NavigationProgress />
+          </Suspense>
           <div className="flex min-h-svh">
             {user && <SiteSidebar />}
             <div className="flex min-w-0 flex-1 flex-col">
