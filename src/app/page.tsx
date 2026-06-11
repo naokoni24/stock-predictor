@@ -171,15 +171,21 @@ function WatchlistRow({ s, signalType }: { s: Row; signalType: string }) {
           )}
           {signalType === "buy_candidate" && <AiScoreBar score={s.ml_score} />}
         </div>
-        {signalType === "buy_candidate" && s.ml_signal !== "buy_candidate" && s.ml_score != null && (
-          <span
-            className={cn(
-              "text-[10px] text-right",
-              s.ml_score < 0.45 ? "text-bearish" : "text-muted-foreground"
-            )}
-          >
-            ※テクニカルは買いですが、AI予測は{aiSentimentLabel(s.ml_score)}です
-          </span>
+        {signalType === "buy_candidate" && s.ml_score != null && (
+          s.ml_signal === "buy_candidate" ? (
+            <span className="text-[10px] text-bullish text-right">
+              ※テクニカルとAI予測がともに買いを示しています
+            </span>
+          ) : (
+            <span
+              className={cn(
+                "text-[10px] text-right",
+                s.ml_score < 0.45 ? "text-bearish" : "text-muted-foreground"
+              )}
+            >
+              ※テクニカルは買いですが、AI予測は{aiSentimentLabel(s.ml_score)}です
+            </span>
+          )
         )}
       </div>
     </Link>
