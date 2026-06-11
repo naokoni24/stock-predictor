@@ -3,7 +3,7 @@ import { login } from "./actions";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
-import { Button } from "@/components/ui/button";
+import { LoginSubmitButton } from "@/components/login-submit-button";
 
 export default async function LoginPage({
   searchParams,
@@ -35,9 +35,7 @@ export default async function LoginPage({
               <Input id="password" name="password" type="password" required />
             </div>
 
-            <Button type="submit" className="mt-2">
-              ログイン
-            </Button>
+            <LoginSubmitButton />
           </form>
         </CardContent>
       </Card>
