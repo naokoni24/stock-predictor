@@ -218,7 +218,7 @@ export default async function Home() {
             <TabsList>
               <TabsTrigger
                 value="buy"
-                className="gap-1.5 data-[state=active]:bg-bullish/15 data-[state=active]:text-bullish data-[state=active]:font-semibold dark:data-[state=active]:bg-bullish/15"
+                className="gap-1.5 data-[state=active]:bg-bullish data-[state=active]:text-bullish-foreground data-[state=active]:font-semibold dark:data-[state=active]:bg-bullish dark:data-[state=active]:text-bullish-foreground"
               >
                 <ArrowUpRight className="size-4" />
                 買い候補
@@ -226,7 +226,7 @@ export default async function Home() {
               </TabsTrigger>
               <TabsTrigger
                 value="sell"
-                className="gap-1.5 data-[state=active]:bg-bearish/15 data-[state=active]:text-bearish data-[state=active]:font-semibold dark:data-[state=active]:bg-bearish/15"
+                className="gap-1.5 data-[state=active]:bg-bearish data-[state=active]:text-bearish-foreground data-[state=active]:font-semibold dark:data-[state=active]:bg-bearish dark:data-[state=active]:text-bearish-foreground"
               >
                 <ArrowDownRight className="size-4" />
                 売り候補
