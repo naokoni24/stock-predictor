@@ -35,12 +35,10 @@ async function fetchTab(signalType: "buy_candidate" | "sell_candidate") {
   const { data: signals, error } = await supabase
     .from("signals")
     .select("ticker, date, close, rsi14, signal, score, ml_signal, ml_score, stocks(name, sector)")
-    .eq("signal", signalType)
     .order("date", { ascending: false })
-    .order("score", { ascending: signalType === "sell_candidate" })
-    .limit(200);
+    .limit(500);
 
-  // 銘柄ごとに最新日のシグナルのみを残す
+  // 銘柄ごとに最新日のシグナルのみを残す(タブの種類に関わらず最新日を優先)
   const latestByTicker = new Map<string, NonNullable<typeof signals>[number]>();
   for (const s of signals ?? []) {
     if (!latestByTicker.has(s.ticker)) {
@@ -49,6 +47,12 @@ async function fetchTab(signalType: "buy_candidate" | "sell_candidate") {
   }
 
   const rows: Row[] = Array.from(latestByTicker.values())
+    .filter((s) => s.signal === signalType)
+    .sort((a, b) =>
+      signalType === "sell_candidate"
+        ? (a.score ?? 0) - (b.score ?? 0)
+        : (b.score ?? 0) - (a.score ?? 0)
+    )
     .slice(0, 10)
     .map((s) => {
       const stock = Array.isArray(s.stocks) ? s.stocks[0] : s.stocks;
