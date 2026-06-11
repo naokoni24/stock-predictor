@@ -39,7 +39,11 @@ export default function HoldingsForm({ error }: { error?: string }) {
             </div>
           </div>
 
-          {error && <p className="text-bearish text-sm">エラー: {error}</p>}
+          {error && (
+            <div className="rounded-lg border border-bearish/30 bg-bearish/10 px-4 py-3 text-sm font-medium text-bearish">
+              エラー: {error}
+            </div>
+          )}
 
           <Button type="submit" className="self-start">
             追加
