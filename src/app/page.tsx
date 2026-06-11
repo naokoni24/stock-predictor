@@ -163,6 +163,11 @@ function WatchlistRow({ s, signalType }: { s: Row; signalType: string }) {
           )}
           {signalType === "buy_candidate" && <AiScoreBar score={s.ml_score} />}
         </div>
+        {signalType === "buy_candidate" && s.ml_signal !== "buy_candidate" && s.ml_score != null && s.ml_score < 0.5 && (
+          <span className="text-[10px] text-bearish text-right">
+            ※テクニカルは買いですが、AI予測は弱気です
+          </span>
+        )}
       </div>
     </Link>
   );
