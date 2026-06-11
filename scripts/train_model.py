@@ -20,6 +20,7 @@ import yfinance as yf
 from fetch_and_signal import TICKERS, calc_rsi, calc_macd, calc_bollinger, get_screener_tickers, get_jp_sector_map
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier
 from sklearn.metrics import accuracy_score, classification_report
+from sklearn.utils.class_weight import compute_sample_weight
 
 # N日後に株価がこの%以上上昇していたら「上昇」ラベル(1)とする
 HORIZON_DAYS = 5
@@ -461,6 +462,7 @@ def main():
         min_samples_leaf=20,
         random_state=42,
         n_jobs=-1,
+        class_weight="balanced",
     )
     gb = GradientBoostingClassifier(
         n_estimators=100,
@@ -471,7 +473,10 @@ def main():
     model = VotingClassifier(
         estimators=[("rf", rf), ("gb", gb)], voting="soft"
     )
-    model.fit(X_train, y_train)
+    # GradientBoostingはclass_weightを持たないため、sample_weightで不均衡を補正する
+    # (RandomForestはclass_weight="balanced"と併用されるが、sample_weightにも従う)
+    sample_weight = compute_sample_weight(class_weight="balanced", y=y_train)
+    model.fit(X_train, y_train, sample_weight=sample_weight)
 
     pred = model.predict(X_test)
     print(f"\nテストデータ正解率: {accuracy_score(y_test, pred):.3f}")
