@@ -37,7 +37,8 @@ async function fetchTab(signalType: "buy_candidate" | "sell_candidate") {
     .select("ticker, date, close, rsi14, signal, score, ml_signal, ml_score, stocks(name, sector)")
     .eq("signal", signalType)
     .order("date", { ascending: false })
-    .order("score", { ascending: signalType === "sell_candidate" });
+    .order("score", { ascending: signalType === "sell_candidate" })
+    .limit(200);
 
   // 銘柄ごとに最新日のシグナルのみを残す
   const latestByTicker = new Map<string, NonNullable<typeof signals>[number]>();
@@ -64,7 +65,8 @@ async function fetchTab(signalType: "buy_candidate" | "sell_candidate") {
       .from("prices")
       .select("ticker, date, close")
       .in("ticker", tickers)
-      .order("date", { ascending: false });
+      .order("date", { ascending: false })
+      .limit(tickers.length * 2);
 
     const byTicker = new Map<string, number[]>();
     for (const p of prices ?? []) {
