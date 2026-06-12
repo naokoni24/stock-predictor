@@ -395,6 +395,10 @@ def main():
         ]
     ).execute()
 
+    # ファンダメンタル指標(.info)の取得は1銘柄あたり追加リクエストが発生し遅いため、
+    # 主力銘柄+保有株のみに絞って取得する
+    fundamentals_targets = set(TICKERS) | set(get_holdings_tickers(sb))
+
     histories = {}
     fundamentals = {}
     for ticker in all_tickers:
@@ -404,7 +408,8 @@ def main():
             print(f"skip {ticker}: no data")
             continue
 
-        fundamentals[ticker] = get_fundamentals(yf_ticker)
+        if ticker in fundamentals_targets:
+            fundamentals[ticker] = get_fundamentals(yf_ticker)
 
         hist = hist.reset_index()
         hist["date"] = hist["Date"].dt.date
