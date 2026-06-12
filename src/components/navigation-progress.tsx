@@ -30,10 +30,10 @@ export function NavigationProgress() {
     return () => document.removeEventListener("click", handleClick);
   }, [pathname, searchParams]);
 
-  // 遷移先のパスに変わったら表示を消す
+  // 遷移先のパスに変わったら表示を消す(最低表示時間を確保)
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setLoading(false);
+    const timer = setTimeout(() => setLoading(false), 400);
+    return () => clearTimeout(timer);
   }, [pathname, searchParams]);
 
   if (!loading) return null;
