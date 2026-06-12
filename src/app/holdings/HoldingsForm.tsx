@@ -1,18 +1,32 @@
 "use client";
 
+import { useState } from "react";
+import { ChevronDown } from "lucide-react";
 import { addHolding } from "./actions";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import TickerSearch from "./TickerSearch";
 import { SubmitButton } from "@/components/login-submit-button";
+import { cn } from "@/lib/utils";
 
-export default function HoldingsForm({ error }: { error?: string }) {
+export default function HoldingsForm({ error, collapsedByDefault }: { error?: string; collapsedByDefault?: boolean }) {
+  const [open, setOpen] = useState(!collapsedByDefault);
+
   return (
     <Card>
-      <CardHeader>
-        <CardTitle className="text-base">保有株を追加</CardTitle>
+      <CardHeader
+        className={cn(collapsedByDefault && "cursor-pointer")}
+        onClick={collapsedByDefault ? () => setOpen((v) => !v) : undefined}
+      >
+        <CardTitle className="text-base flex items-center justify-between">
+          保有株を追加
+          {collapsedByDefault && (
+            <ChevronDown className={cn("size-4 text-muted-foreground transition-transform", open && "rotate-180")} />
+          )}
+        </CardTitle>
       </CardHeader>
+      {open && (
       <CardContent>
         <form
           action={addHolding}
@@ -58,6 +72,7 @@ export default function HoldingsForm({ error }: { error?: string }) {
           <SubmitButton label="追加" pendingLabel="登録中..." />
         </form>
       </CardContent>
+      )}
     </Card>
   );
 }

@@ -178,7 +178,7 @@ export default async function HoldingsPage({
         </Card>
       )}
 
-      <HoldingsForm error={formError} />
+      <HoldingsForm error={formError} collapsedByDefault={rows.length > 0} />
 
       {error && <p className="text-bearish text-sm">データ取得エラー: {error.message}</p>}
 
