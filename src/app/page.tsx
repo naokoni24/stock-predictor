@@ -145,7 +145,7 @@ function WatchlistRow({ s, signalType }: { s: Row; signalType: string }) {
     >
       <div className="flex flex-col gap-0.5 min-w-0 flex-1 max-w-xs">
         <div className="flex items-center gap-2">
-          <p className="font-semibold text-base sm:text-lg truncate">{s.stockName ?? s.ticker}</p>
+          <p className="font-semibold text-sm sm:text-lg truncate">{s.stockName ?? s.ticker}</p>
           <span className="text-muted-foreground text-xs shrink-0">{s.ticker}</span>
         </div>
         <p className="text-xs text-muted-foreground truncate">
