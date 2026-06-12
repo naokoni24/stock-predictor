@@ -112,7 +112,7 @@ function AiScoreBar({ score }: { score: number | null | undefined }) {
   if (score == null) return null;
   const pct = Math.round(score * 100);
   return (
-    <div className="flex items-center gap-2 w-full max-w-28">
+    <div className="flex items-center gap-2 w-full max-w-48">
       <div className="h-1.5 flex-1 rounded-full bg-secondary overflow-hidden">
         <div
           className={cn(
