@@ -4,6 +4,7 @@ import { createClient } from "@/lib/supabase-server";
 import HoldingsForm from "./HoldingsForm";
 import AllocationChart from "./AllocationChart";
 import DeleteHoldingButton from "./DeleteHoldingButton";
+import DismissibleAlert from "./DismissibleAlert";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { cn, getCloseLabel } from "@/lib/utils";
@@ -103,22 +104,24 @@ export default async function HoldingsPage({
       {(lossAlerts.length > 0 || gainAlerts.length > 0) && (
         <div className="flex flex-col gap-2">
           {lossAlerts.map((h) => (
-            <div
+            <DismissibleAlert
               key={`loss-${h.id}`}
-              className="flex items-center gap-2 rounded-lg border border-bearish/30 bg-bearish/10 px-4 py-3 text-sm font-medium text-bearish"
+              id={`loss-${h.id}`}
+              className="rounded-lg border border-bearish/30 bg-bearish/10 px-4 py-3 text-sm font-medium text-bearish"
             >
               <AlertTriangle className="size-4 shrink-0" />
               {h.stockName ?? h.ticker}が{Math.abs(h.profitRate ?? 0).toFixed(1)}%下落しています（損益アラート）
-            </div>
+            </DismissibleAlert>
           ))}
           {gainAlerts.map((h) => (
-            <div
+            <DismissibleAlert
               key={`gain-${h.id}`}
-              className="flex items-center gap-2 rounded-lg border border-bullish/30 bg-bullish/10 px-4 py-3 text-sm font-medium text-bullish"
+              id={`gain-${h.id}`}
+              className="rounded-lg border border-bullish/30 bg-bullish/10 px-4 py-3 text-sm font-medium text-bullish"
             >
               <AlertTriangle className="size-4 shrink-0" />
               {h.stockName ?? h.ticker}が{(h.profitRate ?? 0).toFixed(1)}%上昇しています（利益確定の検討を）
-            </div>
+            </DismissibleAlert>
           ))}
         </div>
       )}
