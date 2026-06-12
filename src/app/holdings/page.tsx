@@ -217,7 +217,7 @@ export default async function HoldingsPage({
             </div>
 
             {h.marketValue != null && h.profitAmount != null && (
-              <div className="flex flex-col items-end gap-0.5 shrink-0">
+              <div className="flex flex-1 flex-col items-end gap-0.5">
                 <span className="text-sm font-semibold tabular-nums">
                   ¥{Math.round(h.marketValue).toLocaleString()}
                 </span>
