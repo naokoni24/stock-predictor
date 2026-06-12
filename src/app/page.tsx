@@ -151,27 +151,27 @@ function WatchlistRow({ s, signalType }: { s: Row; signalType: string }) {
         <p className="text-xs text-muted-foreground truncate">
           {s.sector ?? "ー"} · RSI {s.rsi14?.toFixed(1) ?? "ー"}
         </p>
-        {signalType === "buy_candidate" && s.ml_score != null && (
-          s.ml_signal === "buy_candidate" ? (
-            <span className="text-[10px] text-bullish">
-              ※AI予測も買いを示しています
-            </span>
-          ) : (
-            <span
-              className={cn(
-                "text-[10px]",
-                s.ml_score < 0.45 ? "text-bearish" : "text-muted-foreground"
-              )}
-            >
-              ※AI予測は{aiSentimentLabel(s.ml_score)}です
-            </span>
-          )
-        )}
       </div>
 
       {signalType === "buy_candidate" && (
-        <div className="flex-1 hidden sm:flex justify-center">
+        <div className="flex-1 hidden sm:flex flex-col items-center gap-1">
           <AiScoreBar score={s.ml_score} />
+          {s.ml_score != null && (
+            s.ml_signal === "buy_candidate" ? (
+              <span className="text-[10px] text-bullish">
+                ※AI予測も買いを示しています
+              </span>
+            ) : (
+              <span
+                className={cn(
+                  "text-[10px]",
+                  s.ml_score < 0.45 ? "text-bearish" : "text-muted-foreground"
+                )}
+              >
+                ※AI予測は{aiSentimentLabel(s.ml_score)}です
+              </span>
+            )
+          )}
         </div>
       )}
 
