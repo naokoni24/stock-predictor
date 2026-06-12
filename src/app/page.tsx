@@ -193,6 +193,11 @@ function WatchlistRow({ s, signalType }: { s: Row; signalType: string }) {
           ) : (
             <Badge variant="outline">{SIGNAL_LABEL[s.signal ?? ""] ?? "ー"}</Badge>
           )}
+          {signalType === "buy_candidate" && (
+            <div className="sm:hidden">
+              <AiScoreBar score={s.ml_score} />
+            </div>
+          )}
         </div>
       </div>
     </Link>
