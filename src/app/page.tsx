@@ -154,7 +154,7 @@ function WatchlistRow({ s, signalType }: { s: Row; signalType: string }) {
       </div>
 
       {signalType === "buy_candidate" && (
-        <div className="flex-1 hidden sm:flex flex-col items-center gap-1">
+        <div className="flex-1 flex flex-col items-center gap-1">
           <AiScoreBar score={s.ml_score} />
           {s.ml_score != null && (
             s.ml_signal === "buy_candidate" ? (
@@ -192,11 +192,6 @@ function WatchlistRow({ s, signalType }: { s: Row; signalType: string }) {
             <Badge variant="secondary">AI買い</Badge>
           ) : (
             <Badge variant="outline">{SIGNAL_LABEL[s.signal ?? ""] ?? "ー"}</Badge>
-          )}
-          {signalType === "buy_candidate" && (
-            <div className="sm:hidden">
-              <AiScoreBar score={s.ml_score} />
-            </div>
           )}
         </div>
       </div>
