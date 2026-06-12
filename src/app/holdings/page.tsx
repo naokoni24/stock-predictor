@@ -201,7 +201,7 @@ export default async function HoldingsPage({
         {rows.map((h) => (
           <div
             key={h.id}
-            className="flex items-center justify-between gap-4 rounded-xl border border-border bg-card px-4 py-3.5"
+            className="flex flex-col gap-3 rounded-xl border border-border bg-card px-4 py-3.5 sm:flex-row sm:items-center sm:justify-between"
           >
             <div className="min-w-0">
               <Link href={`/stock/${h.ticker}`} className="font-semibold hover:underline">
@@ -216,33 +216,35 @@ export default async function HoldingsPage({
               </p>
             </div>
 
-            {h.marketValue != null && h.profitAmount != null && (
-              <div className="flex flex-1 flex-col items-end gap-0.5">
-                <span className="text-sm font-semibold tabular-nums">
-                  ¥{Math.round(h.marketValue).toLocaleString()}
-                </span>
-                {h.profitRate != null && (
-                  <span
-                    className={cn(
-                      "flex items-center gap-0.5 text-xs font-medium tabular-nums",
-                      h.profitRate >= 0 ? "text-bullish" : "text-bearish"
-                    )}
-                  >
-                    {h.profitRate >= 0 ? <ArrowUpRight className="size-3" /> : <ArrowDownRight className="size-3" />}
-                    {h.profitRate >= 0 ? "+" : ""}
-                    {Math.round(h.profitAmount).toLocaleString()}円 ({h.profitRate >= 0 ? "+" : ""}
-                    {h.profitRate.toFixed(1)}%)
+            <div className="flex flex-wrap items-center justify-between gap-3 sm:flex-1 sm:justify-end">
+              {h.marketValue != null && h.profitAmount != null && (
+                <div className="flex flex-col items-end gap-0.5">
+                  <span className="text-sm font-semibold tabular-nums">
+                    ¥{Math.round(h.marketValue).toLocaleString()}
                   </span>
-                )}
-              </div>
-            )}
-
-            <div className="flex items-center gap-3 shrink-0">
-              <Badge className={h.risk.className}>リスク{h.risk.label}</Badge>
-              {h.signal === "sell_candidate" && (
-                <Badge className="bg-bearish text-bearish-foreground">売り時</Badge>
+                  {h.profitRate != null && (
+                    <span
+                      className={cn(
+                        "flex items-center gap-0.5 text-xs font-medium tabular-nums whitespace-nowrap",
+                        h.profitRate >= 0 ? "text-bullish" : "text-bearish"
+                      )}
+                    >
+                      {h.profitRate >= 0 ? <ArrowUpRight className="size-3" /> : <ArrowDownRight className="size-3" />}
+                      {h.profitRate >= 0 ? "+" : ""}
+                      {Math.round(h.profitAmount).toLocaleString()}円 ({h.profitRate >= 0 ? "+" : ""}
+                      {h.profitRate.toFixed(1)}%)
+                    </span>
+                  )}
+                </div>
               )}
-              <DeleteHoldingButton id={h.id} />
+
+              <div className="flex items-center gap-3 shrink-0">
+                <Badge className={h.risk.className}>リスク{h.risk.label}</Badge>
+                {h.signal === "sell_candidate" && (
+                  <Badge className="bg-bearish text-bearish-foreground">売り時</Badge>
+                )}
+                <DeleteHoldingButton id={h.id} />
+              </div>
             </div>
           </div>
         ))}
