@@ -185,7 +185,7 @@ function WatchlistRow({ s, signalType }: { s: Row; signalType: string }) {
           </div>
           <ChangeBadge value={s.changePct} />
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center justify-center gap-2 w-full">
           {s.signal === "buy_candidate" && s.ml_signal === "buy_candidate" ? (
             <Badge className="bg-bullish text-bullish-foreground">本命</Badge>
           ) : s.ml_signal === "buy_candidate" ? (
