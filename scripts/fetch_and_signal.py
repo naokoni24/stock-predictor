@@ -464,7 +464,8 @@ def main():
             [
                 {"ticker": ticker, **values}
                 for ticker, values in fundamentals.items()
-            ]
+            ],
+            on_conflict="ticker",
         ).execute()
 
     feature_frames = {}
