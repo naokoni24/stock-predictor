@@ -204,10 +204,24 @@ export default async function HoldingsPage({
             className="flex items-center justify-between gap-4 rounded-xl border border-border bg-card px-4 py-3.5"
           >
             <div className="min-w-0">
-              <Link href={`/stock/${h.ticker}`} className="font-semibold hover:underline">
-                {h.stockName ?? h.ticker}{" "}
-                <span className="text-muted-foreground text-xs">{h.ticker}</span>
-              </Link>
+              <div className="flex items-center gap-2">
+                <Link href={`/stock/${h.ticker}`} className="font-semibold hover:underline">
+                  {h.stockName ?? h.ticker}{" "}
+                  <span className="text-muted-foreground text-xs">{h.ticker}</span>
+                </Link>
+                {h.profitRate != null && (
+                  <span
+                    className={cn(
+                      "flex items-center gap-0.5 text-sm font-semibold tabular-nums",
+                      h.profitRate >= 0 ? "text-bullish" : "text-bearish"
+                    )}
+                  >
+                    {h.profitRate >= 0 ? <ArrowUpRight className="size-3.5" /> : <ArrowDownRight className="size-3.5" />}
+                    {h.profitRate >= 0 ? "+" : ""}
+                    {h.profitRate.toFixed(1)}%
+                  </span>
+                )}
+              </div>
               <p className="text-sm text-muted-foreground mt-0.5">
                 {h.shares}株 / 取得単価 ¥{h.cost_price.toLocaleString()}
                 {h.currentPrice != null && (
@@ -217,18 +231,6 @@ export default async function HoldingsPage({
             </div>
 
             <div className="flex items-center gap-3 shrink-0">
-              {h.profitRate != null && (
-                <span
-                  className={cn(
-                    "flex items-center gap-0.5 text-sm font-semibold tabular-nums",
-                    h.profitRate >= 0 ? "text-bullish" : "text-bearish"
-                  )}
-                >
-                  {h.profitRate >= 0 ? <ArrowUpRight className="size-3.5" /> : <ArrowDownRight className="size-3.5" />}
-                  {h.profitRate >= 0 ? "+" : ""}
-                  {h.profitRate.toFixed(1)}%
-                </span>
-              )}
               <Badge className={h.risk.className}>リスク{h.risk.label}</Badge>
               {h.signal === "sell_candidate" && (
                 <Badge className="bg-bearish text-bearish-foreground">売り時</Badge>
