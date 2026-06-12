@@ -462,7 +462,12 @@ def main():
     if fundamentals:
         sb.table("stocks").upsert(
             [
-                {"ticker": ticker, **values}
+                {
+                    "ticker": ticker,
+                    "name": all_tickers.get(ticker, ticker),
+                    "sector": jp_sectors.get(ticker),
+                    **values,
+                }
                 for ticker, values in fundamentals.items()
             ],
             on_conflict="ticker",
