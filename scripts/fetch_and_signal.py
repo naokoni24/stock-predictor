@@ -409,21 +409,12 @@ def main():
         ]
     ).execute()
 
-    # ファンダメンタル指標(.info)の取得は1銘柄あたり追加リクエストが発生し遅い・不安定なため、
-    # 保有株のみに絞って取得する(タイムアウト時はNoneのまま)
-    fundamentals_targets = set(get_holdings_tickers(sb))
-
     histories = {}
-    fundamentals = {}
     for ticker in all_tickers:
-        yf_ticker = yf.Ticker(ticker)
-        hist = yf_ticker.history(period="6mo")
+        hist = yf.Ticker(ticker).history(period="6mo")
         if hist.empty:
             print(f"skip {ticker}: no data")
             continue
-
-        if ticker in fundamentals_targets:
-            fundamentals[ticker] = get_fundamentals(yf_ticker)
 
         hist = hist.reset_index()
         hist["date"] = hist["Date"].dt.date
@@ -458,21 +449,6 @@ def main():
         sb.table("prices").upsert(price_rows).execute()
         histories[ticker] = hist
 
-    # ファンダメンタル指標(PER/PBR/目標株価/予想EPS)を銘柄マスタに反映
-    if fundamentals:
-        sb.table("stocks").upsert(
-            [
-                {
-                    "ticker": ticker,
-                    "name": all_tickers.get(ticker, ticker),
-                    "sector": jp_sectors.get(ticker),
-                    **values,
-                }
-                for ticker, values in fundamentals.items()
-            ],
-            on_conflict="ticker",
-        ).execute()
-
     feature_frames = {}
     if model_bundle is not None:
         from train_model import add_sector_relative_features, build_features
@@ -485,6 +461,7 @@ def main():
 
     news_sentiment = get_news_sentiment(sb, list(histories.keys()))
 
+    signal_results = []
     for ticker, hist in histories.items():
         # 最新日のシグナルを保存
         latest = hist.iloc[-1]
@@ -519,6 +496,47 @@ def main():
         ).execute()
 
         print(f"{ticker}: signal={signal} score={score} ml_signal={ml_signal} ml_score={ml_score}")
+        signal_results.append({"ticker": ticker, "signal": signal, "score": score})
+
+    update_fundamentals(sb, all_tickers, jp_sectors, signal_results)
+
+
+# トップページのウォッチリスト(おすすめ)に表示される件数と同じ
+WATCHLIST_SIZE = 10
+
+
+def update_fundamentals(sb, all_tickers, jp_sectors, signal_results):
+    """ウォッチリスト上位(買い/売り候補)+保有株に絞ってPER/PBR等を取得・保存する。
+    .info取得は1銘柄あたり追加リクエストが発生し遅い・不安定なため対象を絞り、
+    取得できない・タイムアウトした銘柄はNoneのまま保存する。"""
+    buy_candidates = sorted(
+        (r for r in signal_results if r["signal"] == "buy_candidate"),
+        key=lambda r: r["score"],
+        reverse=True,
+    )[:WATCHLIST_SIZE]
+    sell_candidates = sorted(
+        (r for r in signal_results if r["signal"] == "sell_candidate"),
+        key=lambda r: r["score"],
+    )[:WATCHLIST_SIZE]
+
+    targets = {r["ticker"] for r in buy_candidates} | {r["ticker"] for r in sell_candidates}
+    targets |= set(get_holdings_tickers(sb))
+
+    if not targets:
+        return
+
+    rows = []
+    for ticker in targets:
+        values = get_fundamentals(yf.Ticker(ticker))
+        rows.append({
+            "ticker": ticker,
+            "name": all_tickers.get(ticker, ticker),
+            "sector": jp_sectors.get(ticker),
+            **values,
+        })
+
+    sb.table("stocks").upsert(rows, on_conflict="ticker").execute()
+    print(f"fundamentals updated for {len(rows)} tickers")
 
 
 if __name__ == "__main__":
