@@ -5,6 +5,7 @@ import Link from "next/link";
 import { Search } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import { cn } from "@/lib/utils";
 
 const SIGNAL_LABEL: Record<string, string> = {
   buy_candidate: "買い候補",
@@ -54,9 +55,9 @@ export default function SearchableStockList({ stocks }: { stocks: StockRow[] }) 
           <Link
             key={s.ticker}
             href={`/stock/${s.ticker}`}
-            className="flex items-center justify-between rounded-xl border border-border bg-card px-4 py-3.5 transition-colors hover:bg-accent/50"
+            className="flex items-center justify-between gap-3 rounded-xl border border-border bg-card px-4 py-3.5 transition-colors hover:bg-accent/50"
           >
-            <div className="min-w-0">
+            <div className="min-w-0 flex-1">
               <p className="font-semibold truncate">
                 {s.name ?? s.ticker}{" "}
                 <span className="text-muted-foreground text-xs">{s.ticker}</span>
@@ -66,13 +67,14 @@ export default function SearchableStockList({ stocks }: { stocks: StockRow[] }) 
             {s.signal && (
               <Badge
                 variant={s.signal === "hold" ? "outline" : "default"}
-                className={
+                className={cn(
+                  "shrink-0",
                   s.signal === "buy_candidate"
                     ? "bg-bullish text-bullish-foreground"
                     : s.signal === "sell_candidate"
                       ? "bg-bearish text-bearish-foreground"
                       : ""
-                }
+                )}
               >
                 {SIGNAL_LABEL[s.signal] ?? "ー"}
               </Badge>
