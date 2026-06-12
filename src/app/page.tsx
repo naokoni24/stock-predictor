@@ -143,7 +143,7 @@ function WatchlistRow({ s, signalType }: { s: Row; signalType: string }) {
       href={`/stock/${s.ticker}`}
       className="flex items-center justify-between gap-4 rounded-xl border border-border bg-card px-4 py-3.5 transition-colors hover:bg-accent/50"
     >
-      <div className="flex flex-col gap-0.5 min-w-0">
+      <div className="flex flex-col gap-0.5 min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <p className="font-semibold truncate">{s.stockName ?? s.ticker}</p>
           <span className="text-muted-foreground text-xs shrink-0">{s.ticker}</span>
@@ -151,6 +151,22 @@ function WatchlistRow({ s, signalType }: { s: Row; signalType: string }) {
         <p className="text-xs text-muted-foreground truncate">
           {s.sector ?? "ー"} · RSI {s.rsi14?.toFixed(1) ?? "ー"}
         </p>
+        {signalType === "buy_candidate" && s.ml_score != null && (
+          s.ml_signal === "buy_candidate" ? (
+            <span className="text-[10px] text-bullish">
+              ※AI予測も買いを示しています
+            </span>
+          ) : (
+            <span
+              className={cn(
+                "text-[10px]",
+                s.ml_score < 0.45 ? "text-bearish" : "text-muted-foreground"
+              )}
+            >
+              ※AI予測は{aiSentimentLabel(s.ml_score)}です
+            </span>
+          )
+        )}
       </div>
 
       <div className="flex flex-col items-end gap-1.5 shrink-0">
@@ -173,22 +189,6 @@ function WatchlistRow({ s, signalType }: { s: Row; signalType: string }) {
           )}
           {signalType === "buy_candidate" && <AiScoreBar score={s.ml_score} />}
         </div>
-        {signalType === "buy_candidate" && s.ml_score != null && (
-          s.ml_signal === "buy_candidate" ? (
-            <span className="text-[10px] text-bullish text-right">
-              ※AI予測も買いを示しています
-            </span>
-          ) : (
-            <span
-              className={cn(
-                "text-[10px] text-right",
-                s.ml_score < 0.45 ? "text-bearish" : "text-muted-foreground"
-              )}
-            >
-              ※AI予測は{aiSentimentLabel(s.ml_score)}です
-            </span>
-          )
-        )}
       </div>
     </Link>
   );
