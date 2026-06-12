@@ -154,7 +154,7 @@ function WatchlistRow({ s, signalType }: { s: Row; signalType: string }) {
       </div>
 
       {signalType === "buy_candidate" && (
-        <div className="flex-1 flex flex-col items-start gap-1 self-start pt-4">
+        <div className="hidden sm:flex flex-1 flex-col items-start gap-1 self-start pt-4">
           <AiScoreBar score={s.ml_score} />
           {s.ml_score != null && (
             s.ml_signal === "buy_candidate" ? (
