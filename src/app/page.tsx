@@ -143,7 +143,7 @@ function WatchlistRow({ s, signalType }: { s: Row; signalType: string }) {
       href={`/stock/${s.ticker}`}
       className="flex items-center justify-between gap-4 rounded-xl border border-border bg-card px-4 py-3.5 transition-colors hover:bg-accent/50"
     >
-      <div className="flex flex-col gap-0.5 min-w-0 flex-1">
+      <div className="flex flex-col gap-0.5 min-w-0 flex-1 max-w-xs">
         <div className="flex items-center gap-2">
           <p className="font-semibold truncate">{s.stockName ?? s.ticker}</p>
           <span className="text-muted-foreground text-xs shrink-0">{s.ticker}</span>
@@ -169,6 +169,12 @@ function WatchlistRow({ s, signalType }: { s: Row; signalType: string }) {
         )}
       </div>
 
+      {signalType === "buy_candidate" && (
+        <div className="flex-1 hidden sm:flex justify-center">
+          <AiScoreBar score={s.ml_score} />
+        </div>
+      )}
+
       <div className="flex flex-col items-end gap-1.5 shrink-0">
         <div className="flex items-end gap-3">
           <div className="flex flex-col items-end gap-0.5">
@@ -187,7 +193,11 @@ function WatchlistRow({ s, signalType }: { s: Row; signalType: string }) {
           ) : (
             <Badge variant="outline">{SIGNAL_LABEL[s.signal ?? ""] ?? "ー"}</Badge>
           )}
-          {signalType === "buy_candidate" && <AiScoreBar score={s.ml_score} />}
+          {signalType === "buy_candidate" && (
+            <div className="sm:hidden">
+              <AiScoreBar score={s.ml_score} />
+            </div>
+          )}
         </div>
       </div>
     </Link>
