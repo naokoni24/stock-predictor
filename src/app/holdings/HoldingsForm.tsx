@@ -4,8 +4,8 @@ import { addHolding } from "./actions";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
-import { Button } from "@/components/ui/button";
 import TickerSearch from "./TickerSearch";
+import { SubmitButton } from "@/components/login-submit-button";
 
 export default function HoldingsForm({ error }: { error?: string }) {
   return (
@@ -55,9 +55,7 @@ export default function HoldingsForm({ error }: { error?: string }) {
             </div>
           )}
 
-          <Button type="submit" className="self-start">
-            追加
-          </Button>
+          <SubmitButton label="追加" pendingLabel="登録中..." />
         </form>
       </CardContent>
     </Card>
