@@ -311,6 +311,22 @@ def get_screener_tickers(size: int = 50) -> dict[str, str]:
     return result
 
 
+def get_fundamentals(yf_ticker: yf.Ticker) -> dict:
+    """PER/PBR/アナリスト目標株価/予想EPSを取得(取得できない項目はNone)"""
+    try:
+        info = yf_ticker.info or {}
+    except Exception as e:
+        print(f"failed to load fundamentals for {yf_ticker.ticker}: {e}")
+        return {"per": None, "pbr": None, "target_price": None, "forecast_eps": None}
+
+    return {
+        "per": info.get("trailingPE"),
+        "pbr": info.get("priceToBook"),
+        "target_price": info.get("targetMeanPrice"),
+        "forecast_eps": info.get("forwardEps"),
+    }
+
+
 def make_signal(row) -> tuple[str | None, float]:
     """ルールベースでシグナルとスコアを決定"""
     if (
@@ -380,11 +396,15 @@ def main():
     ).execute()
 
     histories = {}
+    fundamentals = {}
     for ticker in all_tickers:
-        hist = yf.Ticker(ticker).history(period="6mo")
+        yf_ticker = yf.Ticker(ticker)
+        hist = yf_ticker.history(period="6mo")
         if hist.empty:
             print(f"skip {ticker}: no data")
             continue
+
+        fundamentals[ticker] = get_fundamentals(yf_ticker)
 
         hist = hist.reset_index()
         hist["date"] = hist["Date"].dt.date
@@ -418,6 +438,15 @@ def main():
         ]
         sb.table("prices").upsert(price_rows).execute()
         histories[ticker] = hist
+
+    # ファンダメンタル指標(PER/PBR/目標株価/予想EPS)を銘柄マスタに反映
+    if fundamentals:
+        sb.table("stocks").upsert(
+            [
+                {"ticker": ticker, **values}
+                for ticker, values in fundamentals.items()
+            ]
+        ).execute()
 
     feature_frames = {}
     if model_bundle is not None:

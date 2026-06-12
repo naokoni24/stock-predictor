@@ -32,7 +32,7 @@ export default async function StockDetail({
 
   const [{ data: stock }, { data: prices, error }, { data: signal }, { data: scoreHistory }, { data: signalHistory }] =
     await Promise.all([
-      supabase.from("stocks").select("name, sector").eq("ticker", ticker).maybeSingle(),
+      supabase.from("stocks").select("name, sector, per, pbr, target_price, forecast_eps").eq("ticker", ticker).maybeSingle(),
       supabase
         .from("prices")
         .select("date, open, high, low, close, volume")
@@ -191,6 +191,31 @@ export default async function StockDetail({
               </CardHeader>
               <CardContent>
                 <AiScoreHistoryChart data={[...scoreHistory].reverse()} />
+              </CardContent>
+            </Card>
+          )}
+
+          {stock && (stock.per != null || stock.pbr != null || stock.target_price != null) && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">ファンダメンタル指標</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-8">
+                  <div className="flex flex-col">
+                    <IndicatorRow label="PER(予想)" value={stock.per != null ? `${stock.per.toFixed(1)}倍` : "ー"} />
+                    <Separator />
+                    <IndicatorRow label="PBR" value={stock.pbr != null ? `${stock.pbr.toFixed(2)}倍` : "ー"} />
+                  </div>
+                  <div className="flex flex-col">
+                    <IndicatorRow
+                      label="アナリスト目標株価"
+                      value={stock.target_price != null ? `¥${Math.round(stock.target_price).toLocaleString()}` : "ー"}
+                    />
+                    <Separator />
+                    <IndicatorRow label="予想EPS" value={stock.forecast_eps != null ? `¥${stock.forecast_eps.toFixed(2)}` : "ー"} />
+                  </div>
+                </div>
               </CardContent>
             </Card>
           )}
