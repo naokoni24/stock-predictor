@@ -312,7 +312,7 @@ def get_screener_tickers(size: int = 50) -> dict[str, str]:
     return result
 
 
-FUNDAMENTALS_TIMEOUT_SEC = 5
+FUNDAMENTALS_TIMEOUT_SEC = 8
 
 
 def get_fundamentals(yf_ticker: yf.Ticker) -> dict:
