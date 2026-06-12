@@ -14,6 +14,7 @@
 """
 
 import os
+import signal
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 
@@ -311,13 +312,26 @@ def get_screener_tickers(size: int = 50) -> dict[str, str]:
     return result
 
 
+FUNDAMENTALS_TIMEOUT_SEC = 5
+
+
 def get_fundamentals(yf_ticker: yf.Ticker) -> dict:
-    """PER/PBR/アナリスト目標株価/予想EPSを取得(取得できない項目はNone)"""
+    """PER/PBR/アナリスト目標株価/予想EPSを取得(取得できない・タイムアウト時はNone)"""
+    empty = {"per": None, "pbr": None, "target_price": None, "forecast_eps": None}
+
+    def handler(signum, frame):
+        raise TimeoutError()
+
+    old_handler = signal.signal(signal.SIGALRM, handler)
+    signal.alarm(FUNDAMENTALS_TIMEOUT_SEC)
     try:
         info = yf_ticker.info or {}
     except Exception as e:
         print(f"failed to load fundamentals for {yf_ticker.ticker}: {e}")
-        return {"per": None, "pbr": None, "target_price": None, "forecast_eps": None}
+        return empty
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old_handler)
 
     return {
         "per": info.get("trailingPE"),
@@ -395,9 +409,9 @@ def main():
         ]
     ).execute()
 
-    # ファンダメンタル指標(.info)の取得は1銘柄あたり追加リクエストが発生し遅いため、
-    # 主力銘柄+保有株のみに絞って取得する
-    fundamentals_targets = set(TICKERS) | set(get_holdings_tickers(sb))
+    # ファンダメンタル指標(.info)の取得は1銘柄あたり追加リクエストが発生し遅い・不安定なため、
+    # 保有株のみに絞って取得する(タイムアウト時はNoneのまま)
+    fundamentals_targets = set(get_holdings_tickers(sb))
 
     histories = {}
     fundamentals = {}
