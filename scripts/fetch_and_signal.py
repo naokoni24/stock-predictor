@@ -13,6 +13,7 @@
 必要な環境変数: SUPABASE_URL, SUPABASE_SERVICE_KEY
 """
 
+import math
 import os
 import signal
 from collections import OrderedDict
@@ -333,11 +334,17 @@ def get_fundamentals(yf_ticker: yf.Ticker) -> dict:
         signal.alarm(0)
         signal.signal(signal.SIGALRM, old_handler)
 
+    def clean(value):
+        # yfinanceがnanを返すことがあり、そのままだとJSONシリアライズに失敗するため除外
+        if isinstance(value, float) and math.isnan(value):
+            return None
+        return value
+
     return {
-        "per": info.get("trailingPE"),
-        "pbr": info.get("priceToBook"),
-        "target_price": info.get("targetMeanPrice"),
-        "forecast_eps": info.get("forwardEps"),
+        "per": clean(info.get("trailingPE")),
+        "pbr": clean(info.get("priceToBook")),
+        "target_price": clean(info.get("targetMeanPrice")),
+        "forecast_eps": clean(info.get("forwardEps")),
     }
 
 
