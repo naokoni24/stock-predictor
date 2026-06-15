@@ -30,6 +30,8 @@ TARGET_RETURN = 0.02
 # 買い判定のしきい値候補。再学習時にテストデータのバックテスト成績で最適値を選ぶ。
 THRESHOLD_GRID = [round(x, 3) for x in [0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80]]
 DEFAULT_ML_BUY_THRESHOLD = 0.55
+MIN_ADJUSTED_ML_BUY_THRESHOLD = 0.50
+MAX_ADJUSTED_ML_BUY_THRESHOLD = 0.80
 
 MARKET_INDICES = {
     "nikkei": ["^N225"],
@@ -126,9 +128,117 @@ def calibrate_scores(raw_scores, calibration_values: list[float] | None):
     return np.interp(raw_scores, calibration_values, percentiles)
 
 
-def evaluate_threshold(scores, future_returns, threshold: float) -> dict:
+def _feature_value(row: pd.Series, column: str, default: float = 0.0) -> float:
+    """特徴量の欠損や未定義を安全に中立値へ寄せる"""
+    value = row.get(column, default)
+    if pd.isna(value) or not np.isfinite(value):
+        return default
+    return float(value)
+
+
+def market_regime_adjustment(row: pd.Series) -> float:
+    """市場環境に応じてML買いしきい値を微調整する"""
+    adjustment = 0.0
+
+    nikkei_5d = _feature_value(row, "nikkei_return_5d")
+    topix_5d = _feature_value(row, "topix_return_5d")
+    nasdaq_5d = _feature_value(row, "nasdaq_return_5d")
+    sox_5d = _feature_value(row, "sox_return_5d")
+    vix_5d = _feature_value(row, "vix_return_5d")
+    nikkei_sma25 = _feature_value(row, "nikkei_sma25_ratio")
+    topix_sma25 = _feature_value(row, "topix_sma25_ratio")
+
+    # 地合いが悪い日は買い判定を厳しくする。無料で取れる指数だけを使う。
+    if nikkei_5d < -0.02 or topix_5d < -0.02:
+        adjustment += 0.04
+    if nasdaq_5d < -0.03 or sox_5d < -0.04:
+        adjustment += 0.03
+    if vix_5d > 0.15:
+        adjustment += 0.03
+    if nikkei_sma25 < -0.03 or topix_sma25 < -0.03:
+        adjustment += 0.03
+
+    # 地合いが素直に強い日は、良い候補を少し拾いやすくする。
+    if (
+        nikkei_5d > 0.01
+        and topix_5d > 0.01
+        and nikkei_sma25 > 0
+        and topix_sma25 > 0
+        and vix_5d < 0
+    ):
+        adjustment -= 0.03
+    if nasdaq_5d > 0.02 and sox_5d > 0.02 and vix_5d < 0:
+        adjustment -= 0.02
+
+    return adjustment
+
+
+def adjusted_ml_buy_threshold(base_threshold: float, row: pd.Series) -> float:
+    """市場環境を反映した当日用のML買いしきい値"""
+    threshold = base_threshold + market_regime_adjustment(row)
+    return float(np.clip(threshold, MIN_ADJUSTED_ML_BUY_THRESHOLD, MAX_ADJUSTED_ML_BUY_THRESHOLD))
+
+
+def ml_buy_block_reasons(row: pd.Series) -> list[str]:
+    """AIスコアが高くても買いを見送る条件を返す"""
+    reasons = []
+
+    nikkei_20d = _feature_value(row, "nikkei_return_20d")
+    topix_20d = _feature_value(row, "topix_return_20d")
+    nikkei_sma75 = _feature_value(row, "nikkei_sma75_ratio")
+    topix_sma75 = _feature_value(row, "topix_sma75_ratio")
+    vix_5d = _feature_value(row, "vix_return_5d")
+
+    if nikkei_20d < -0.05 and topix_20d < -0.05 and (nikkei_sma75 < 0 or topix_sma75 < 0):
+        reasons.append("市場全体が下落トレンド")
+    if vix_5d > 0.30:
+        reasons.append("VIX急上昇")
+
+    return_5d = _feature_value(row, "return_5d")
+    volume_ratio = _feature_value(row, "volume_ratio", 1.0)
+    volatility_20d = _feature_value(row, "volatility_20d")
+    atr_ratio_14d = _feature_value(row, "atr_ratio_14d")
+    upper_shadow_ratio = _feature_value(row, "upper_shadow_ratio")
+    close_location = _feature_value(row, "close_location", 0.5)
+    range_expansion_20d = _feature_value(row, "range_expansion_20d", 1.0)
+    intraday_return = _feature_value(row, "intraday_return")
+    max_drawdown_20d = _feature_value(row, "max_drawdown_20d")
+
+    if return_5d > 0.03 and volume_ratio < 0.60:
+        reasons.append("薄商いの上昇")
+    if volatility_20d > 0.06 or atr_ratio_14d > 0.08:
+        reasons.append("値動きが荒すぎる")
+    if upper_shadow_ratio > 0.60 and close_location < 0.45:
+        reasons.append("上ヒゲで押し戻されている")
+    if range_expansion_20d > 2.5 and intraday_return < 0:
+        reasons.append("下落方向の値幅拡大")
+    if return_5d < -0.08 or max_drawdown_20d < -0.18:
+        reasons.append("短期下落が深い")
+
+    return reasons
+
+
+def is_ml_buy_blocked(row: pd.Series) -> bool:
+    """買わないフィルターに該当するか"""
+    return bool(ml_buy_block_reasons(row))
+
+
+def evaluate_threshold(
+    scores,
+    future_returns,
+    threshold: float,
+    feature_rows: pd.DataFrame | None = None,
+) -> dict:
     """指定しきい値で買った場合の5営業日後リターンを評価する"""
-    mask = scores >= threshold
+    if feature_rows is not None:
+        thresholds = feature_rows.apply(
+            lambda row: adjusted_ml_buy_threshold(threshold, row),
+            axis=1,
+        ).to_numpy()
+        blocked = feature_rows.apply(is_ml_buy_blocked, axis=1).to_numpy(dtype=bool)
+        mask = (scores >= thresholds) & ~blocked
+    else:
+        mask = scores >= threshold
     selected_returns = future_returns[mask]
     trades = int(mask.sum())
     if trades == 0:
@@ -161,11 +271,15 @@ def evaluate_threshold(scores, future_returns, threshold: float) -> dict:
     }
 
 
-def optimize_ml_buy_threshold(scores, future_returns) -> tuple[float, list[dict]]:
-    """テストデータで買い判定しきい値を自動最適化する"""
+def optimize_ml_buy_threshold(
+    scores,
+    future_returns,
+    feature_rows: pd.DataFrame | None = None,
+) -> tuple[float, list[dict]]:
+    """検証データで買い判定しきい値を自動最適化する"""
     min_trades = max(30, int(len(scores) * 0.02))
     results = [
-        evaluate_threshold(scores, future_returns, threshold)
+        evaluate_threshold(scores, future_returns, threshold, feature_rows)
         for threshold in THRESHOLD_GRID
     ]
     valid_results = [r for r in results if r["trades"] >= min_trades]
@@ -517,12 +631,18 @@ def main():
     ml_buy_threshold, threshold_results = optimize_ml_buy_threshold(
         val_scores,
         val_df["future_return"].to_numpy(),
+        val_df[feature_columns],
     )
 
     # テストデータ(完全に未使用のデータ)でしきい値の最終評価を行う
     test_raw_proba = model.predict_proba(X_test)[:, 1]
     test_scores = calibrate_scores(test_raw_proba, calibration_values)
-    test_eval = evaluate_threshold(test_scores, test_df["future_return"].to_numpy(), ml_buy_threshold)
+    test_eval = evaluate_threshold(
+        test_scores,
+        test_df["future_return"].to_numpy(),
+        ml_buy_threshold,
+        test_df[feature_columns],
+    )
     print(
         f"\nテストデータでの最終評価(しきい値{ml_buy_threshold:.2f}): "
         f"trades={test_eval['trades']} win_rate={test_eval['win_rate'] * 100:.1f}% "
@@ -551,7 +671,7 @@ def main():
                 "horizon_days": HORIZON_DAYS,
                 "target_return": TARGET_RETURN,
                 "grid": THRESHOLD_GRID,
-                "metric": "val_avg_return_with_win_hit_bonus",
+                "metric": "val_avg_return_with_win_hit_bonus_dynamic_market_filters",
             },
         },
         MODEL_PATH,

@@ -15,9 +15,11 @@ import yfinance as yf
 from fetch_and_signal import TICKERS, calc_rsi, calc_macd, calc_bollinger, get_jp_sector_map
 from train_model import (
     add_sector_relative_features,
+    adjusted_ml_buy_threshold,
     build_features,
     calibrate_scores,
     get_nikkei_returns,
+    is_ml_buy_blocked,
     FEATURE_COLUMNS,
     MODEL_PATH,
     THRESHOLD_GRID,
@@ -136,7 +138,8 @@ def simulate_ml(
     n = len(hist)
     while i < n - 1 - HOLD_DAYS:
         score = df.iloc[i]["ml_score"]
-        ml_buy = pd.notna(score) and score >= threshold
+        effective_threshold = adjusted_ml_buy_threshold(threshold, df.iloc[i])
+        ml_buy = pd.notna(score) and score >= effective_threshold and not is_ml_buy_blocked(df.iloc[i])
         if ml_buy and require_rule_buy:
             ml_buy = make_signal_param(hist.iloc[i]) == "buy_candidate"
 

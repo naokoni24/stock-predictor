@@ -78,7 +78,7 @@ def predict_ml(model_bundle, hist, nikkei, sector=None, feature_df=None, news_se
     if model_bundle is None:
         return None, None
 
-    from train_model import build_features
+    from train_model import adjusted_ml_buy_threshold, build_features, ml_buy_block_reasons
 
     df = feature_df if feature_df is not None else build_features(hist, nikkei)
     row = df.iloc[-1].copy()
@@ -107,8 +107,14 @@ def predict_ml(model_bundle, hist, nikkei, sector=None, feature_df=None, news_se
     # ニュースセンチメントで微調整(-1.0〜1.0 を ±NEWS_SENTIMENT_WEIGHT に変換)
     score = score + news_sentiment * NEWS_SENTIMENT_WEIGHT
     score = min(max(score, 0.0), 1.0)
-    threshold = float(model_bundle.get("ml_buy_threshold", ML_BUY_THRESHOLD))
-    signal = "buy_candidate" if score >= threshold else "hold"
+    threshold = adjusted_ml_buy_threshold(
+        float(model_bundle.get("ml_buy_threshold", ML_BUY_THRESHOLD)),
+        row,
+    )
+    block_reasons = ml_buy_block_reasons(row)
+    signal = "buy_candidate" if score >= threshold and not block_reasons else "hold"
+    if score >= threshold and block_reasons:
+        print(f"ML buy blocked: reasons={','.join(block_reasons)} score={score:.4f} threshold={threshold:.2f}")
     return signal, round(score, 4)
 
 # 対象銘柄(ティッカー: 名称)。必要に応じて追加・holdingsテーブルと連動させる
