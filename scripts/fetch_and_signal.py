@@ -78,7 +78,12 @@ def predict_ml(model_bundle, hist, nikkei, sector=None, feature_df=None, news_se
     if model_bundle is None:
         return None, None
 
-    from train_model import adjusted_ml_buy_threshold, build_features, ml_buy_block_reasons
+    from train_model import (
+        adjusted_ml_buy_threshold,
+        build_features,
+        ml_buy_block_reasons,
+        sector_base_threshold,
+    )
 
     df = feature_df if feature_df is not None else build_features(hist, nikkei)
     row = df.iloc[-1].copy()
@@ -107,8 +112,13 @@ def predict_ml(model_bundle, hist, nikkei, sector=None, feature_df=None, news_se
     # ニュースセンチメントで微調整(-1.0〜1.0 を ±NEWS_SENTIMENT_WEIGHT に変換)
     score = score + news_sentiment * NEWS_SENTIMENT_WEIGHT
     score = min(max(score, 0.0), 1.0)
-    threshold = adjusted_ml_buy_threshold(
+    base_threshold = sector_base_threshold(
         float(model_bundle.get("ml_buy_threshold", ML_BUY_THRESHOLD)),
+        model_bundle.get("sector_ml_buy_thresholds"),
+        sector,
+    )
+    threshold = adjusted_ml_buy_threshold(
+        base_threshold,
         row,
     )
     block_reasons = ml_buy_block_reasons(row)

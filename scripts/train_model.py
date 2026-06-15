@@ -32,6 +32,8 @@ THRESHOLD_GRID = [round(x, 3) for x in [0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70
 DEFAULT_ML_BUY_THRESHOLD = 0.55
 MIN_ADJUSTED_ML_BUY_THRESHOLD = 0.50
 MAX_ADJUSTED_ML_BUY_THRESHOLD = 0.80
+MIN_SECTOR_THRESHOLD_ROWS = 120
+MIN_SECTOR_THRESHOLD_TRADES = 10
 
 MARKET_INDICES = {
     "nikkei": ["^N225"],
@@ -173,6 +175,17 @@ def market_regime_adjustment(row: pd.Series) -> float:
     return adjustment
 
 
+def sector_base_threshold(
+    base_threshold: float,
+    sector_thresholds: dict[str, float] | None = None,
+    sector: str | None = None,
+) -> float:
+    """業種別しきい値があれば使い、なければ全体しきい値を使う"""
+    if sector and sector_thresholds and sector in sector_thresholds:
+        return float(sector_thresholds[sector])
+    return float(base_threshold)
+
+
 def adjusted_ml_buy_threshold(base_threshold: float, row: pd.Series) -> float:
     """市場環境を反映した当日用のML買いしきい値"""
     threshold = base_threshold + market_regime_adjustment(row)
@@ -228,13 +241,26 @@ def evaluate_threshold(
     future_returns,
     threshold: float,
     feature_rows: pd.DataFrame | None = None,
+    sectors: pd.Series | None = None,
+    sector_thresholds: dict[str, float] | None = None,
 ) -> dict:
     """指定しきい値で買った場合の5営業日後リターンを評価する"""
+    scores = np.asarray(scores)
+    future_returns = np.asarray(future_returns)
     if feature_rows is not None:
-        thresholds = feature_rows.apply(
-            lambda row: adjusted_ml_buy_threshold(threshold, row),
-            axis=1,
-        ).to_numpy()
+        sector_values = sectors.reindex(feature_rows.index) if sectors is not None else None
+        thresholds = [
+            adjusted_ml_buy_threshold(
+                sector_base_threshold(
+                    threshold,
+                    sector_thresholds,
+                    None if sector_values is None else str(sector_values.loc[index]),
+                ),
+                row,
+            )
+            for index, row in feature_rows.iterrows()
+        ]
+        thresholds = np.asarray(thresholds)
         blocked = feature_rows.apply(is_ml_buy_blocked, axis=1).to_numpy(dtype=bool)
         mask = (scores >= thresholds) & ~blocked
     else:
@@ -275,9 +301,10 @@ def optimize_ml_buy_threshold(
     scores,
     future_returns,
     feature_rows: pd.DataFrame | None = None,
+    min_trades: int | None = None,
 ) -> tuple[float, list[dict]]:
     """検証データで買い判定しきい値を自動最適化する"""
-    min_trades = max(30, int(len(scores) * 0.02))
+    min_trades = min_trades if min_trades is not None else max(30, int(len(scores) * 0.02))
     results = [
         evaluate_threshold(scores, future_returns, threshold, feature_rows)
         for threshold in THRESHOLD_GRID
@@ -293,6 +320,58 @@ def optimize_ml_buy_threshold(
         key=lambda r: (r["objective"], r["avg_return"], r["win_rate"], r["trades"]),
     )
     return float(best["threshold"]), results
+
+
+def optimize_sector_thresholds(
+    base_threshold: float,
+    scores,
+    future_returns,
+    feature_rows: pd.DataFrame,
+    sectors: pd.Series,
+) -> tuple[dict[str, float], dict[str, dict]]:
+    """業種ごとに、共通しきい値より良い場合だけ専用しきい値を採用する"""
+    sector_thresholds: dict[str, float] = {}
+    sector_results: dict[str, dict] = {}
+    score_series = pd.Series(scores, index=feature_rows.index)
+    return_series = pd.Series(future_returns, index=feature_rows.index)
+
+    for sector, sector_index in sectors.groupby(sectors).groups.items():
+        if sector == "不明" or len(sector_index) < MIN_SECTOR_THRESHOLD_ROWS:
+            continue
+
+        sector_features = feature_rows.loc[sector_index]
+        sector_scores = score_series.loc[sector_index].to_numpy()
+        sector_returns = return_series.loc[sector_index].to_numpy()
+        min_trades = max(MIN_SECTOR_THRESHOLD_TRADES, int(len(sector_features) * 0.03))
+
+        global_eval = evaluate_threshold(
+            sector_scores,
+            sector_returns,
+            base_threshold,
+            sector_features,
+        )
+        threshold, results = optimize_ml_buy_threshold(
+            sector_scores,
+            sector_returns,
+            sector_features,
+            min_trades=min_trades,
+        )
+        best_eval = next((r for r in results if r["threshold"] == threshold), None)
+        if best_eval is None or best_eval["trades"] < min_trades:
+            continue
+
+        # 共通しきい値より検証目的関数が良い業種だけ採用し、過剰な業種別最適化を避ける。
+        if best_eval["objective"] > global_eval["objective"] and threshold != base_threshold:
+            sector_thresholds[str(sector)] = float(threshold)
+            sector_results[str(sector)] = {
+                "threshold": float(threshold),
+                "rows": int(len(sector_features)),
+                "min_trades": int(min_trades),
+                "global_eval": global_eval,
+                "best_eval": best_eval,
+            }
+
+    return sector_thresholds, sector_results
 
 
 def build_market_features(symbols: str | list[str], prefix: str) -> pd.DataFrame:
@@ -537,6 +616,7 @@ def build_dataset() -> pd.DataFrame:
         print(f"{ticker}: {len(df)} rows")
 
     dataset = pd.concat(rows, ignore_index=True)
+    dataset["sector_label"] = dataset["sector"]
     dataset = pd.get_dummies(dataset, columns=["sector"], prefix="sector")
     return dataset
 
@@ -549,7 +629,7 @@ def main():
     # 業種one-hot列のみを抽出する。sector_return_* などの数値特徴量は除外する。
     sector_columns = [
         c for c in dataset.columns
-        if c.startswith("sector_") and c not in FEATURE_COLUMNS
+        if c.startswith("sector_") and c not in FEATURE_COLUMNS and c != "sector_label"
     ]
     feature_columns = FEATURE_COLUMNS + sector_columns
 
@@ -633,6 +713,13 @@ def main():
         val_df["future_return"].to_numpy(),
         val_df[feature_columns],
     )
+    sector_ml_buy_thresholds, sector_threshold_results = optimize_sector_thresholds(
+        ml_buy_threshold,
+        val_scores,
+        val_df["future_return"].to_numpy(),
+        val_df[feature_columns],
+        val_df["sector_label"],
+    )
 
     # テストデータ(完全に未使用のデータ)でしきい値の最終評価を行う
     test_raw_proba = model.predict_proba(X_test)[:, 1]
@@ -642,9 +729,11 @@ def main():
         test_df["future_return"].to_numpy(),
         ml_buy_threshold,
         test_df[feature_columns],
+        test_df["sector_label"],
+        sector_ml_buy_thresholds,
     )
     print(
-        f"\nテストデータでの最終評価(しきい値{ml_buy_threshold:.2f}): "
+        f"\nテストデータでの最終評価(共通しきい値{ml_buy_threshold:.2f}+業種別調整): "
         f"trades={test_eval['trades']} win_rate={test_eval['win_rate'] * 100:.1f}% "
         f"avg_return={test_eval['avg_return'] * 100:.2f}% total_return={test_eval['total_return'] * 100:.1f}%"
     )
@@ -657,6 +746,12 @@ def main():
             f"{result['avg_return'] * 100:>10.2f}% {result['total_return'] * 100:>12.1f}%"
         )
     print(f"採用するML買いしきい値: {ml_buy_threshold:.2f}")
+    if sector_ml_buy_thresholds:
+        print("採用する業種別ML買いしきい値:")
+        for sector, threshold in sorted(sector_ml_buy_thresholds.items()):
+            print(f"  {sector}: {threshold:.2f}")
+    else:
+        print("採用する業種別ML買いしきい値: なし(全業種で共通しきい値を使用)")
 
     joblib.dump(
         {
@@ -666,7 +761,9 @@ def main():
             "feature_version": "candlestick_features_v1",
             "score_calibration": calibration_values,
             "ml_buy_threshold": ml_buy_threshold,
+            "sector_ml_buy_thresholds": sector_ml_buy_thresholds,
             "threshold_results": threshold_results,
+            "sector_threshold_results": sector_threshold_results,
             "threshold_optimization": {
                 "horizon_days": HORIZON_DAYS,
                 "target_return": TARGET_RETURN,

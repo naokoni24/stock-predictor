@@ -20,6 +20,7 @@ from train_model import (
     calibrate_scores,
     get_nikkei_returns,
     is_ml_buy_blocked,
+    sector_base_threshold,
     FEATURE_COLUMNS,
     MODEL_PATH,
     THRESHOLD_GRID,
@@ -115,6 +116,7 @@ def simulate_ml(
     sector: str | None = None,
     feature_df: pd.DataFrame | None = None,
     score_calibration: list[float] | None = None,
+    sector_thresholds: dict[str, float] | None = None,
     start_idx: int = 0,
 ) -> list[float]:
     """MLモデル: 上昇確率がthreshold以上で翌日始値で購入 -> HOLD_DAYS後の始値で売却
@@ -136,9 +138,10 @@ def simulate_ml(
     returns = []
     i = start_idx
     n = len(hist)
+    base_threshold = sector_base_threshold(threshold, sector_thresholds, sector)
     while i < n - 1 - HOLD_DAYS:
         score = df.iloc[i]["ml_score"]
-        effective_threshold = adjusted_ml_buy_threshold(threshold, df.iloc[i])
+        effective_threshold = adjusted_ml_buy_threshold(base_threshold, df.iloc[i])
         ml_buy = pd.notna(score) and score >= effective_threshold and not is_ml_buy_blocked(df.iloc[i])
         if ml_buy and require_rule_buy:
             ml_buy = make_signal_param(hist.iloc[i]) == "buy_candidate"
@@ -178,6 +181,7 @@ def main():
     sector_columns = bundle.get("sector_columns", [])
     score_calibration = bundle.get("score_calibration")
     ml_buy_threshold = float(bundle.get("ml_buy_threshold", DEFAULT_ML_BUY_THRESHOLD))
+    sector_thresholds = bundle.get("sector_ml_buy_thresholds", {})
     jp_sectors = get_jp_sector_map()
     feature_frames = {
         ticker: build_features(hist, nikkei)
@@ -203,6 +207,7 @@ def main():
                 sector=sector,
                 feature_df=feature_frames.get(ticker),
                 score_calibration=score_calibration,
+                sector_thresholds=sector_thresholds,
                 start_idx=start_idx,
             )
         )
@@ -218,6 +223,7 @@ def main():
                 sector=sector,
                 feature_df=feature_frames.get(ticker),
                 score_calibration=score_calibration,
+                sector_thresholds=sector_thresholds,
                 start_idx=start_idx,
             )
         )
