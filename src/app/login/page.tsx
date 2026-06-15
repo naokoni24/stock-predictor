@@ -5,6 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { SubmitButton } from "@/components/login-submit-button";
+import { AuthTimeoutReset } from "@/components/auth-timeout-reset";
 
 export default async function LoginPage({
   searchParams,
@@ -15,6 +16,7 @@ export default async function LoginPage({
 
   return (
     <div className="flex flex-col items-center justify-center flex-1 py-12">
+      <AuthTimeoutReset />
       <Card className="w-full max-w-sm">
         <CardHeader className="items-center text-center gap-2">
           <div className="flex size-10 items-center justify-center rounded-xl bg-primary text-primary-foreground">
