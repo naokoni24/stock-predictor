@@ -2,8 +2,9 @@ name: Daily stock signal update
 
 on:
   schedule:
-    # 毎日16:30 JST (UTC 7:30)
-    - cron: "30 7 * * *"
+    # 毎日16:30 JST
+    - cron: "30 16 * * *"
+      timezone: "Asia/Tokyo"
   workflow_dispatch: {}
 
 jobs:
@@ -15,6 +16,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Show trigger time
+        run: |
+          echo "UTC: $(date -u '+%Y-%m-%d %H:%M:%S')"
+          TZ=Asia/Tokyo date '+JST: %Y-%m-%d %H:%M:%S'
+          echo "event: ${{ github.event_name }}"
+          echo "schedule: ${{ github.event.schedule }}"
 
       - name: Install dependencies
         run: pip install -r scripts/requirements.txt
