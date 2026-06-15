@@ -551,7 +551,7 @@ def main():
                 "horizon_days": HORIZON_DAYS,
                 "target_return": TARGET_RETURN,
                 "grid": THRESHOLD_GRID,
-                "metric": "test_avg_return_with_win_hit_bonus",
+                "metric": "val_avg_return_with_win_hit_bonus",
             },
         },
         MODEL_PATH,
