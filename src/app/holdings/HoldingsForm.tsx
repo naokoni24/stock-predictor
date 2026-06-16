@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, PlusCircle } from "lucide-react";
 import { addHolding } from "./actions";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
@@ -14,13 +14,16 @@ export default function HoldingsForm({ error, collapsedByDefault }: { error?: st
   const [open, setOpen] = useState(!collapsedByDefault);
 
   return (
-    <Card>
+    <Card className="border-primary/40 shadow-sm">
       <CardHeader
-        className={cn(collapsedByDefault && "cursor-pointer")}
+        className={cn("bg-primary/5 rounded-t-xl", collapsedByDefault && "cursor-pointer")}
         onClick={collapsedByDefault ? () => setOpen((v) => !v) : undefined}
       >
-        <CardTitle className="text-base flex items-center justify-between">
-          保有株を追加
+        <CardTitle className="text-base flex items-center justify-between gap-2">
+          <span className="flex items-center gap-2 text-primary">
+            <PlusCircle className="size-4" />
+            保有株を追加
+          </span>
           {collapsedByDefault && (
             <ChevronDown className={cn("size-4 text-muted-foreground transition-transform", open && "rotate-180")} />
           )}
