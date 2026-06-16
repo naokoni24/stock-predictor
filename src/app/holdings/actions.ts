@@ -36,16 +36,23 @@ export async function addHolding(formData: FormData) {
     redirectWithError("ログインが必要です。");
   }
 
-  // 銘柄マスタになければ追加(name未入力ならtickerをそのまま表示名に)
-  const { error: stockError } = await supabase
+  // 銘柄マスタに存在しない場合のみ追加を試みる
+  // RLSポリシー未設定環境ではinsertが拒否されるが、既存銘柄ならholdings追加は継続できる
+  const { data: existingStock } = await supabase
     .from("stocks")
-    .upsert(
-      { ticker, name: name || ticker },
-      { onConflict: "ticker", ignoreDuplicates: true }
-    );
+    .select("ticker")
+    .eq("ticker", ticker)
+    .maybeSingle();
 
-  if (stockError) {
-    redirectWithError(stockError.message);
+  if (!existingStock) {
+    const { error: stockError } = await supabase
+      .from("stocks")
+      .insert({ ticker, name: name || ticker });
+
+    if (stockError && stockError.code !== "42501") {
+      // 42501 = RLS violation: 日次バッチ未取得の銘柄はholdings登録をブロックせず続行
+      redirectWithError(stockError.message);
+    }
   }
 
   const { error: holdingError } = await supabase.from("holdings").insert({
