@@ -2,8 +2,8 @@ name: Daily stock signal update
 
 on:
   schedule:
-    # 毎日16:30 JST (UTC 07:30)
-    - cron: "30 7 * * *"
+    # 毎日13:00 JST (UTC 04:00)
+    - cron: "0 4 * * *"
   workflow_dispatch: {}
 
 jobs:
