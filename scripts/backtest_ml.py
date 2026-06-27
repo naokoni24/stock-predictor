@@ -9,20 +9,30 @@ MLモデル: scripts/model.pkl の予測確率が閾値以上なら買い、
 """
 
 import joblib
+import numpy as np
+import os
 import pandas as pd
 import yfinance as yf
 
 from fetch_and_signal import TICKERS, calc_rsi, calc_macd, calc_bollinger, get_jp_sector_map
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier
+from sklearn.utils.class_weight import compute_sample_weight
+from lightgbm import LGBMClassifier
 from train_model import (
     add_sector_relative_features,
     adjusted_ml_buy_threshold,
     build_features,
     calibrate_scores,
+    evaluate_threshold,
     get_nikkei_returns,
     is_ml_buy_blocked,
+    optimize_ml_buy_threshold,
+    optimize_sector_thresholds,
     sector_base_threshold,
     FEATURE_COLUMNS,
+    HORIZON_DAYS,
     MODEL_PATH,
+    TARGET_RETURN,
     THRESHOLD_GRID,
 )
 
@@ -33,6 +43,13 @@ HOLD_DAYS = 5
 # 直近15%(テスト期間相当)のみをout-of-sample評価の対象とする。
 # こうしないと学習に使った期間でバックテストしてしまい、成績が楽観的に出てしまう。
 TEST_SPLIT_RATIO = 0.85
+
+# 月次walk-forward評価では、評価月の直前3か月をしきい値最適化に使い、
+# それより前だけをモデル学習に使う。未来データの混入を避けるため。
+WALK_FORWARD_VALIDATION_MONTHS = 3
+WALK_FORWARD_MIN_TRAIN_ROWS = 1000
+WALK_FORWARD_MIN_VAL_ROWS = 200
+WALK_FORWARD_MAX_FOLDS = int(os.getenv("WALK_FORWARD_MAX_FOLDS", "6"))
 
 
 def make_signal_param(row, rsi_buy_max: float = 60, rsi_sell_min: float = 75) -> str | None:
@@ -170,6 +187,214 @@ def evaluate(all_returns: list[float]) -> dict:
     }
 
 
+def build_backtest_dataset(
+    histories: dict[str, pd.DataFrame],
+    feature_frames: dict[str, pd.DataFrame],
+    sectors: dict[str, str],
+) -> tuple[pd.DataFrame, list[str]]:
+    """取得済み履歴からwalk-forward評価用の学習テーブルを作る"""
+    rows = []
+    for ticker, df in feature_frames.items():
+        if ticker not in histories or df.empty:
+            continue
+
+        source = df.copy()
+        source["future_return"] = source["Close"].shift(-HORIZON_DAYS) / source["Close"] - 1
+        source["label"] = (source["future_return"] >= TARGET_RETURN).astype(int)
+        source["rule_buy"] = source.apply(lambda row: make_signal_param(row) == "buy_candidate", axis=1)
+        source = source.dropna(subset=FEATURE_COLUMNS + ["future_return", "label"])
+        source = source.iloc[:-HORIZON_DAYS] if len(source) > HORIZON_DAYS else source.iloc[0:0]
+        if source.empty:
+            continue
+
+        source = source[["date"] + FEATURE_COLUMNS + ["future_return", "label", "rule_buy"]].copy()
+        source["ticker"] = ticker
+        source["sector"] = sectors.get(ticker, "不明")
+        rows.append(source)
+
+    if not rows:
+        return pd.DataFrame(), []
+
+    dataset = pd.concat(rows, ignore_index=True)
+    dataset["date"] = pd.to_datetime(dataset["date"])
+    dataset["sector_label"] = dataset["sector"]
+    dataset = pd.get_dummies(dataset, columns=["sector"], prefix="sector")
+    sector_columns = [
+        c for c in dataset.columns
+        if c.startswith("sector_") and c not in FEATURE_COLUMNS and c != "sector_label"
+    ]
+    return dataset.sort_values("date").reset_index(drop=True), sector_columns
+
+
+def make_walk_forward_model():
+    """train_model.pyと同じ構成の一時モデルを作る"""
+    rf = RandomForestClassifier(
+        n_estimators=100,
+        max_depth=5,
+        min_samples_leaf=20,
+        random_state=42,
+        n_jobs=-1,
+        class_weight="balanced",
+    )
+    gb = GradientBoostingClassifier(
+        n_estimators=100,
+        max_depth=3,
+        min_samples_leaf=20,
+        random_state=42,
+    )
+    lgbm = LGBMClassifier(
+        n_estimators=200,
+        max_depth=5,
+        min_child_samples=20,
+        class_weight="balanced",
+        random_state=42,
+        verbose=-1,
+    )
+    return VotingClassifier(
+        estimators=[("rf", rf), ("gb", gb), ("lgbm", lgbm)],
+        voting="soft",
+    )
+
+
+def selected_walk_forward_returns(
+    scores: np.ndarray,
+    fold_df: pd.DataFrame,
+    feature_columns: list[str],
+    threshold: float,
+    sector_thresholds: dict[str, float] | None = None,
+    require_rule_buy: bool = False,
+) -> list[float]:
+    """評価月で買い判定になった行の5営業日後リターン(%)を返す"""
+    returns = []
+    for score, (_, row) in zip(scores, fold_df.iterrows()):
+        sector = str(row.get("sector_label", "不明"))
+        feature_row = row[feature_columns]
+        base_threshold = sector_base_threshold(threshold, sector_thresholds, sector)
+        effective_threshold = adjusted_ml_buy_threshold(base_threshold, feature_row)
+        if pd.isna(score) or score < effective_threshold or is_ml_buy_blocked(feature_row):
+            continue
+        if require_rule_buy and not bool(row.get("rule_buy", False)):
+            continue
+        returns.append(float(row["future_return"]) * 100)
+    return returns
+
+
+def run_walk_forward_evaluation(dataset: pd.DataFrame, sector_columns: list[str]) -> None:
+    """月次walk-forwardで、評価月より未来のデータを使わずに成績を見る"""
+    if dataset.empty:
+        print("\n月次walk-forward評価: データがないためスキップ")
+        return
+
+    feature_columns = FEATURE_COLUMNS + sector_columns
+    for column in feature_columns:
+        if column not in dataset.columns:
+            dataset[column] = 0
+
+    periods = sorted(dataset["date"].dt.to_period("M").unique())
+    if WALK_FORWARD_MAX_FOLDS > 0:
+        periods = periods[-WALK_FORWARD_MAX_FOLDS:]
+    fold_results = []
+    ml_returns = []
+    consensus_returns = []
+
+    if WALK_FORWARD_MAX_FOLDS > 0:
+        print(f"\n月次walk-forward評価 (直近{WALK_FORWARD_MAX_FOLDS}評価月):")
+    else:
+        print("\n月次walk-forward評価 (全評価月):")
+    print(
+        f"{'評価月':>8} {'train':>7} {'val':>6} {'test':>6} "
+        f"{'thr':>5} {'ML件数':>7} {'ML平均':>8} {'一致件数':>8} {'一致平均':>9}"
+    )
+
+    for period in periods:
+        test_start = period.to_timestamp()
+        test_end = (period + 1).to_timestamp()
+        val_start = test_start - pd.DateOffset(months=WALK_FORWARD_VALIDATION_MONTHS)
+
+        train_df = dataset[dataset["date"] < val_start]
+        val_df = dataset[(dataset["date"] >= val_start) & (dataset["date"] < test_start)]
+        test_df = dataset[(dataset["date"] >= test_start) & (dataset["date"] < test_end)]
+        if (
+            len(train_df) < WALK_FORWARD_MIN_TRAIN_ROWS
+            or len(val_df) < WALK_FORWARD_MIN_VAL_ROWS
+            or test_df.empty
+            or train_df["label"].nunique() < 2
+        ):
+            continue
+
+        model = make_walk_forward_model()
+        sample_weight = compute_sample_weight(class_weight="balanced", y=train_df["label"])
+        model.fit(train_df[feature_columns], train_df["label"], sample_weight=sample_weight)
+
+        train_proba = model.predict_proba(train_df[feature_columns])[:, 1]
+        calibration_values = np.percentile(train_proba, np.linspace(0, 100, 21)).tolist()
+
+        val_raw_proba = model.predict_proba(val_df[feature_columns])[:, 1]
+        val_scores = calibrate_scores(val_raw_proba, calibration_values)
+        threshold, _ = optimize_ml_buy_threshold(
+            val_scores,
+            val_df["future_return"].to_numpy(),
+            val_df[feature_columns],
+        )
+        sector_thresholds, _ = optimize_sector_thresholds(
+            threshold,
+            val_scores,
+            val_df["future_return"].to_numpy(),
+            val_df[feature_columns],
+            val_df["sector_label"],
+        )
+
+        test_raw_proba = model.predict_proba(test_df[feature_columns])[:, 1]
+        test_scores = calibrate_scores(test_raw_proba, calibration_values)
+        test_eval = evaluate_threshold(
+            test_scores,
+            test_df["future_return"].to_numpy(),
+            threshold,
+            test_df[feature_columns],
+            test_df["sector_label"],
+            sector_thresholds,
+        )
+
+        fold_ml_returns = selected_walk_forward_returns(
+            test_scores,
+            test_df,
+            feature_columns,
+            threshold,
+            sector_thresholds,
+        )
+        fold_consensus_returns = selected_walk_forward_returns(
+            test_scores,
+            test_df,
+            feature_columns,
+            threshold,
+            sector_thresholds,
+            require_rule_buy=True,
+        )
+        ml_returns.extend(fold_ml_returns)
+        consensus_returns.extend(fold_consensus_returns)
+        fold_results.append(test_eval)
+
+        ml_avg = sum(fold_ml_returns) / len(fold_ml_returns) if fold_ml_returns else 0.0
+        consensus_avg = (
+            sum(fold_consensus_returns) / len(fold_consensus_returns)
+            if fold_consensus_returns
+            else 0.0
+        )
+        print(
+            f"{period} {len(train_df):>7} {len(val_df):>6} {len(test_df):>6} "
+            f"{threshold:>5.2f} {len(fold_ml_returns):>7} {ml_avg:>7.2f}% "
+            f"{len(fold_consensus_returns):>8} {consensus_avg:>8.2f}%"
+        )
+
+    if not fold_results:
+        print("評価可能な月がありませんでした。取得期間を延ばすか、最小行数を調整してください。")
+        return
+
+    print("\n月次walk-forward集計 (評価月より未来のデータは学習・しきい値最適化に未使用):")
+    print(f"MLモデル単独: {evaluate(ml_returns)}")
+    print(f"両シグナル一致: {evaluate(consensus_returns)}")
+
+
 def main():
     print("過去2年分の株価を取得中...")
     histories = load_history()
@@ -188,6 +413,11 @@ def main():
         for ticker, hist in histories.items()
     }
     feature_frames = add_sector_relative_features(feature_frames, jp_sectors)
+    walk_forward_dataset, walk_forward_sector_columns = build_backtest_dataset(
+        histories,
+        feature_frames,
+        jp_sectors,
+    )
 
     rule_returns = []
     ml_returns = []
@@ -263,6 +493,8 @@ def main():
             f"{threshold:>10} {result['trades']:>7} "
             f"{result['win_rate']:>8.1f}% {result['avg_return']:>10.2f}% {result['total_return']:>12.1f}%"
         )
+
+    run_walk_forward_evaluation(walk_forward_dataset, walk_forward_sector_columns)
 
 
 if __name__ == "__main__":
