@@ -72,7 +72,19 @@ export async function addHolding(formData: FormData) {
 
 export async function deleteHolding(id: number) {
   const supabase = await createClient();
-  const { error } = await supabase.from("holdings").delete().eq("id", id);
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  if (!user) {
+    redirectWithError("ログインが必要です。");
+  }
+
+  const { error } = await supabase
+    .from("holdings")
+    .delete()
+    .eq("id", id)
+    .eq("user_id", user.id);
 
   if (error) {
     redirectWithError(error.message);

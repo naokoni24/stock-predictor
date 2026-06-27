@@ -11,14 +11,16 @@ Google News RSS から銘柄ごとのニュースを取得し、
 import os
 import time
 import xml.etree.ElementTree as ET
+from collections import OrderedDict
 from datetime import datetime, timezone
 
 import requests
 from supabase import create_client
 
-from fetch_and_signal import TICKERS
+from fetch_and_signal import TICKERS, get_holdings_tickers, get_previous_signal_tickers
 
 NEWS_PER_TICKER = 3
+NEWS_MAX_TICKERS = int(os.environ.get("NEWS_MAX_TICKERS", "80"))
 
 # キーワードベースの簡易センチメント辞書
 POSITIVE_WORDS = [
@@ -80,13 +82,32 @@ def fetch_news_for(query: str) -> list[dict]:
     return items
 
 
+def add_news_targets(target: OrderedDict[str, str], candidates: dict[str, str]) -> None:
+    for ticker, name in candidates.items():
+        if len(target) >= NEWS_MAX_TICKERS:
+            break
+        target.setdefault(ticker, name or ticker)
+
+
+def get_news_targets(sb) -> OrderedDict[str, str]:
+    """固定銘柄に加え、保有株と直近シグナル銘柄のニュースも取得する"""
+    targets: OrderedDict[str, str] = OrderedDict()
+    add_news_targets(targets, TICKERS)
+    add_news_targets(targets, get_holdings_tickers(sb))
+    add_news_targets(targets, get_previous_signal_tickers(sb, NEWS_MAX_TICKERS))
+    return targets
+
+
 def main():
     url = os.environ["SUPABASE_URL"]
     key = os.environ["SUPABASE_SERVICE_KEY"]
     sb = create_client(url, key)
 
+    targets = get_news_targets(sb)
+    print(f"news targets: {len(targets)} / max {NEWS_MAX_TICKERS}")
+
     rows = []
-    for ticker, name in TICKERS.items():
+    for ticker, name in targets.items():
         try:
             news_items = fetch_news_for(name)
         except Exception as e:

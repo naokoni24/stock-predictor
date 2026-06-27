@@ -41,6 +41,7 @@ export default async function HoldingsPage({
     .order("id");
 
   const tickers = (holdings ?? []).map((h) => h.ticker);
+  const signalFetchLimit = Math.min(Math.max(tickers.length * 5, 50), 500);
 
   const { data: latestSignals } = tickers.length
     ? await supabase
@@ -48,6 +49,7 @@ export default async function HoldingsPage({
         .select("ticker, date, close, signal, rsi14")
         .in("ticker", tickers)
         .order("date", { ascending: false })
+        .limit(signalFetchLimit)
     : { data: [] };
 
   // 各銘柄の最新シグナルのみ残す

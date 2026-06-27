@@ -8,6 +8,7 @@ export default async function StocksPage() {
     .order("ticker");
 
   const tickers = (stocks ?? []).map((s) => s.ticker);
+  const signalFetchLimit = Math.min(Math.max(tickers.length * 5, 300), 1000);
 
   const { data: signals } = tickers.length
     ? await supabase
@@ -15,6 +16,7 @@ export default async function StocksPage() {
         .select("ticker, date, signal")
         .in("ticker", tickers)
         .order("date", { ascending: false })
+        .limit(signalFetchLimit)
     : { data: [] };
 
   const latestSignalByTicker = new Map<string, string | null>();

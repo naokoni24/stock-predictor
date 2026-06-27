@@ -29,6 +29,9 @@ export default async function StockDetail({
   params: Promise<{ ticker: string }>;
 }) {
   const { ticker } = await params;
+  const historySince = new Date();
+  historySince.setDate(historySince.getDate() - 420);
+  const historySinceDate = historySince.toISOString().slice(0, 10);
 
   const [{ data: stock }, { data: prices, error }, { data: signal }, { data: scoreHistory }, { data: signalHistory }] =
     await Promise.all([
@@ -37,6 +40,7 @@ export default async function StockDetail({
         .from("prices")
         .select("date, open, high, low, close, volume")
         .eq("ticker", ticker)
+        .gte("date", historySinceDate)
         .order("date", { ascending: true }),
       supabase
         .from("signals")
@@ -57,6 +61,7 @@ export default async function StockDetail({
         .from("signals")
         .select("date, ml_signal")
         .eq("ticker", ticker)
+        .gte("date", historySinceDate)
         .order("date", { ascending: true }),
     ]);
 
