@@ -94,8 +94,57 @@ def load_history() -> dict[str, pd.DataFrame]:
         hist["rsi14"] = calc_rsi(hist["Close"], 14)
         hist["macd"], hist["macd_signal"] = calc_macd(hist["Close"])
         hist["bb_upper"], hist["bb_lower"] = calc_bollinger(hist["Close"])
+        # ATR(14): ATR連動ストップの算出に使う
+        prev_close = hist["Close"].shift(1)
+        true_range = pd.concat(
+            [
+                hist["High"] - hist["Low"],
+                (hist["High"] - prev_close).abs(),
+                (hist["Low"] - prev_close).abs(),
+            ],
+            axis=1,
+        ).max(axis=1)
+        hist["atr14"] = true_range.rolling(14).mean()
         histories[ticker] = hist
     return histories
+
+
+def simulate_trade_exit(
+    hist: pd.DataFrame,
+    entry_idx: int,
+    hold_days: int,
+    stop_pct: float | None = None,
+    tp_pct: float | None = None,
+    atr_mult: float | None = None,
+) -> tuple[float, int]:
+    """エントリー翌営業日始値で買い、保有期間中に損切り/利確/時間で決済したリターン(%)と決済indexを返す。
+
+    - 損切り: atr_mult指定時はATR連動(買値 - atr_mult*ATR)、なければstop_pct(固定%)
+    - 利確: tp_pct(固定%)
+    - 時間決済: hold_days経過で翌営業日始値
+    - 同日に損切り/利確が両方ヒットした場合は保守的に損切り優先(日足では順序不明のため)
+    """
+    buy_price = hist.iloc[entry_idx + 1]["Open"]
+
+    stop_price = None
+    if atr_mult is not None:
+        atr = hist.iloc[entry_idx].get("atr14", float("nan"))
+        if pd.notna(atr):
+            stop_price = buy_price - atr_mult * atr
+    elif stop_pct is not None:
+        stop_price = buy_price * (1 - stop_pct)
+    tp_price = buy_price * (1 + tp_pct) if tp_pct is not None else None
+
+    time_exit_idx = entry_idx + 1 + hold_days
+    for j in range(entry_idx + 1, time_exit_idx):
+        day = hist.iloc[j]
+        if stop_price is not None and day["Low"] <= stop_price:
+            return (stop_price - buy_price) / buy_price * 100, j
+        if tp_price is not None and day["High"] >= tp_price:
+            return (tp_price - buy_price) / buy_price * 100, j
+
+    exit_price = hist.iloc[time_exit_idx]["Open"]
+    return (exit_price - buy_price) / buy_price * 100, time_exit_idx
 
 
 def simulate_rule(hist: pd.DataFrame, start_idx: int = 0) -> list[float]:
@@ -136,11 +185,16 @@ def simulate_ml(
     score_calibration: list[float] | None = None,
     sector_thresholds: dict[str, float] | None = None,
     start_idx: int = 0,
+    hold_days: int = HOLD_DAYS,
+    stop_pct: float | None = None,
+    tp_pct: float | None = None,
+    atr_mult: float | None = None,
 ) -> list[float]:
-    """MLモデル: 上昇確率がthreshold以上で翌日始値で購入 -> HOLD_DAYS後の始値で売却
+    """MLモデル: 上昇確率がthreshold以上で翌日始値で購入 -> 損切り/利確/時間決済で売却
 
     require_rule_buy=Trueの場合、ルールベースもbuy_candidateの日のみ購入対象とする
     (両シグナル一致フィルタ)
+    stop_pct/tp_pct/atr_mult を指定すると保有期間中に損切り・利確を行う(simulate_trade_exit参照)。
     start_idx以降(out-of-sample期間)のみを評価対象とする。
     """
     df = feature_df.copy() if feature_df is not None else build_features(hist, nikkei)
@@ -157,7 +211,7 @@ def simulate_ml(
     i = start_idx
     n = len(hist)
     base_threshold = sector_base_threshold(threshold, sector_thresholds, sector)
-    while i < n - 1 - HOLD_DAYS:
+    while i < n - 1 - hold_days:
         score = df.iloc[i]["ml_score"]
         effective_threshold = adjusted_ml_buy_threshold(base_threshold, df.iloc[i])
         ml_buy = pd.notna(score) and score >= effective_threshold and not is_ml_buy_blocked(df.iloc[i])
@@ -165,10 +219,9 @@ def simulate_ml(
             ml_buy = make_signal_param(hist.iloc[i]) == "buy_candidate"
 
         if ml_buy:
-            buy_price = hist.iloc[i + 1]["Open"]
-            sell_price = hist.iloc[i + 1 + HOLD_DAYS]["Open"]
-            returns.append((sell_price - buy_price) / buy_price * 100)
-            i += 1 + HOLD_DAYS
+            ret, exit_idx = simulate_trade_exit(hist, i, hold_days, stop_pct, tp_pct, atr_mult)
+            returns.append(ret)
+            i = exit_idx + 1
         else:
             i += 1
 
@@ -409,6 +462,55 @@ def run_walk_forward_evaluation(dataset: pd.DataFrame, sector_columns: list[str]
     print(f"両シグナル一致: {evaluate(consensus_returns)}")
 
 
+def evaluate_with_risk(returns: list[float]) -> dict:
+    """評価指標に標準偏差・最悪トレード・最大ドローダウン(累積リターン%ベース)を追加する"""
+    returns = [r for r in returns if pd.notna(r)]
+    base = evaluate(returns)
+    if not returns:
+        base.update({"std": 0.0, "worst": 0.0, "max_drawdown": 0.0})
+        return base
+    arr = np.array(returns)
+    equity = np.cumsum(arr)
+    running_max = np.maximum.accumulate(equity)
+    base.update(
+        {
+            "std": float(arr.std()),
+            "worst": float(arr.min()),
+            "max_drawdown": float((equity - running_max).min()),
+        }
+    )
+    return base
+
+
+def run_ml_risk_config(
+    histories, model, features, nikkei, jp_sectors, feature_frames,
+    ml_buy_threshold, sector_columns, score_calibration, sector_thresholds,
+    **exit_kwargs,
+) -> dict:
+    """指定した損切り/利確設定でテスト期間のMLトレードを集計する"""
+    returns = []
+    for ticker, hist in histories.items():
+        sector = jp_sectors.get(ticker)
+        start_idx = int(len(hist) * TEST_SPLIT_RATIO)
+        returns.extend(
+            simulate_ml(
+                hist,
+                model,
+                features,
+                nikkei,
+                threshold=ml_buy_threshold,
+                sector_columns=sector_columns,
+                sector=sector,
+                feature_df=feature_frames.get(ticker),
+                score_calibration=score_calibration,
+                sector_thresholds=sector_thresholds,
+                start_idx=start_idx,
+                **exit_kwargs,
+            )
+        )
+    return evaluate_with_risk(returns)
+
+
 def main():
     print("過去2年分の株価を取得中...")
     histories = load_history()
@@ -506,6 +608,30 @@ def main():
         print(
             f"{threshold:>10} {result['trades']:>7} "
             f"{result['win_rate']:>8.1f}% {result['avg_return']:>10.2f}% {result['total_return']:>12.1f}%"
+        )
+
+    print("\nリスク管理(損切り/利確/時間決済)の比較 [テスト期間 / MLモデル単独]:")
+    print(
+        f"{'設定':<24} {'trades':>7} {'win%':>6} {'avg%':>7} "
+        f"{'total%':>9} {'std%':>6} {'worst%':>7} {'maxDD%':>8}"
+    )
+    risk_configs = [
+        ("ベースライン(5日保有)", {}),
+        ("利確+2%", {"tp_pct": 0.02}),
+        ("損切りATR×2", {"atr_mult": 2.0}),
+        ("損切り-8%固定", {"stop_pct": 0.08}),
+        ("利確+2% & 損切りATR×2", {"tp_pct": 0.02, "atr_mult": 2.0}),
+        ("利確+2% & 損切り-8%", {"tp_pct": 0.02, "stop_pct": 0.08}),
+        ("利確+3% & 損切りATR×2.5", {"tp_pct": 0.03, "atr_mult": 2.5}),
+    ]
+    for label, kw in risk_configs:
+        r = run_ml_risk_config(
+            histories, model, features, nikkei, jp_sectors, feature_frames,
+            ml_buy_threshold, sector_columns, score_calibration, sector_thresholds, **kw,
+        )
+        print(
+            f"{label:<24} {r['trades']:>7} {r['win_rate']:>5.1f}% {r['avg_return']:>6.2f}% "
+            f"{r['total_return']:>8.1f}% {r['std']:>5.2f}% {r['worst']:>6.2f}% {r['max_drawdown']:>7.1f}%"
         )
 
     run_walk_forward_evaluation(walk_forward_dataset, walk_forward_sector_columns)
