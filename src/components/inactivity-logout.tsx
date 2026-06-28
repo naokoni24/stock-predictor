@@ -29,13 +29,13 @@ export function InactivityLogout() {
       localStorage.removeItem(SESSION_MARKER_KEY);
     };
 
-    const signOutForTimeout = async (message?: string) => {
+    const signOutForTimeout = async () => {
       if (signedOut) return true;
       signedOut = true;
       if (interval) clearInterval(interval);
       clearStoredSession();
       await supabase.auth.signOut();
-      router.replace(message ? `/login?error=${encodeURIComponent(message)}` : "/login");
+      router.replace("/login");
       router.refresh();
       return true;
     };
@@ -69,7 +69,7 @@ export function InactivityLogout() {
       const lastActivity = Number(localStorage.getItem(LAST_ACTIVITY_KEY) ?? now);
 
       if (now - sessionStarted >= SESSION_LIMIT_MS) {
-        return signOutForTimeout("ログインから12時間が経過したためログアウトしました");
+        return signOutForTimeout();
       }
       if (now - lastActivity >= INACTIVITY_LIMIT_MS) {
         return signOutForTimeout();
