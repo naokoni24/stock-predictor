@@ -49,6 +49,13 @@ export default async function RootLayout({
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className="min-h-full bg-background text-foreground">
+        {/* 描画前に無操作/セッション期限を判定し、期限切れならコンテンツを隠す。
+            InactivityLogout がサインアウトして /login へ遷移するまでのチラ見えを防ぐ。 */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `(function(){try{var p=location.pathname;if(p==='/login'||p==='/forgot-password'||p==='/reset-password')return;var s=localStorage.getItem('sessionStartedAt'),l=localStorage.getItem('lastActivityAt');if(!s||!l)return;var n=Date.now();if(n-Number(s)>=43200000||n-Number(l)>=900000){document.documentElement.setAttribute('data-auth-expired','');}}catch(e){}})();`,
+          }}
+        />
         <ThemeProvider
           attribute="class"
           defaultTheme="dark"

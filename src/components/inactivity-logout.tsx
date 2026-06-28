@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect } from "react";
-import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase-browser";
 
 // 一定時間操作がない場合に自動ログアウトする(Supabase Free Planでは
@@ -16,8 +15,6 @@ const CHECK_INTERVAL_MS = 60 * 1000; // 1分ごとにチェック
 const ACTIVITY_EVENTS = ["mousemove", "mousedown", "keydown", "scroll", "touchstart"] as const;
 
 export function InactivityLogout() {
-  const router = useRouter();
-
   useEffect(() => {
     const supabase = createClient();
     let interval: ReturnType<typeof setInterval> | null = null;
@@ -35,8 +32,9 @@ export function InactivityLogout() {
       if (interval) clearInterval(interval);
       clearStoredSession();
       await supabase.auth.signOut();
-      router.replace("/login");
-      router.refresh();
+      // クライアント遷移だと data-auth-expired が残りログイン画面まで隠れるため、
+      // フルリロードで /login へ遷移する(隠したままログイン画面に切り替わる)。
+      window.location.replace("/login");
       return true;
     };
 
@@ -74,6 +72,8 @@ export function InactivityLogout() {
       if (now - lastActivity >= INACTIVITY_LIMIT_MS) {
         return signOutForTimeout();
       }
+      // 期限内なら、描画前スクリプトが付けた非表示フラグを解除して表示する
+      document.documentElement.removeAttribute("data-auth-expired");
       return false;
     };
 
@@ -112,7 +112,7 @@ export function InactivityLogout() {
       window.removeEventListener("focus", checkTimeout);
       window.removeEventListener("pageshow", checkTimeout);
     };
-  }, [router]);
+  }, []);
 
   return null;
 }
