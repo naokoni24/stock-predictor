@@ -16,12 +16,18 @@ import joblib
 import numpy as np
 import pandas as pd
 import yfinance as yf
+import optuna
 
 from fetch_and_signal import TICKERS, calc_rsi, calc_macd, calc_bollinger, get_screener_tickers, get_jp_sector_map
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier
 from sklearn.metrics import accuracy_score, classification_report
 from sklearn.utils.class_weight import compute_sample_weight
 from lightgbm import LGBMClassifier
+
+optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+# Optunaの試行回数。月次再学習はGitHub Actions上で動くため、実行時間を抑える値にする。
+OPTUNA_N_TRIALS = 30
 
 # N日後に株価がこの%以上上昇していたら「上昇」ラベル(1)とする
 HORIZON_DAYS = 5
@@ -648,27 +654,81 @@ def main():
     print(f"テストデータ: {test_df['date'].min()} 〜 {test_df['date'].max()} ({len(test_df)}行)")
 
     X_train, y_train = train_df[feature_columns], train_df["label"]
+    X_val, y_val = val_df[feature_columns], val_df["label"]
     X_test, y_test = test_df[feature_columns], test_df["label"]
+    sample_weight = compute_sample_weight(class_weight="balanced", y=y_train)
 
-    # RandomForestとGradientBoostingの予測確率を平均するアンサンブル(過学習を抑え、予測を安定化)
+    def objective(trial: optuna.Trial) -> float:
+        """検証データの平均リターン(買いシグナル時)を最大化するハイパーパラメータを探索"""
+        rf = RandomForestClassifier(
+            n_estimators=trial.suggest_int("rf_n_estimators", 50, 300),
+            max_depth=trial.suggest_int("rf_max_depth", 3, 8),
+            min_samples_leaf=trial.suggest_int("rf_min_samples_leaf", 10, 50),
+            random_state=42,
+            n_jobs=-1,
+            class_weight="balanced",
+        )
+        gb = GradientBoostingClassifier(
+            n_estimators=trial.suggest_int("gb_n_estimators", 50, 200),
+            max_depth=trial.suggest_int("gb_max_depth", 2, 5),
+            min_samples_leaf=trial.suggest_int("gb_min_samples_leaf", 10, 50),
+            learning_rate=trial.suggest_float("gb_learning_rate", 0.01, 0.2, log=True),
+            random_state=42,
+        )
+        lgbm = LGBMClassifier(
+            n_estimators=trial.suggest_int("lgbm_n_estimators", 100, 400),
+            max_depth=trial.suggest_int("lgbm_max_depth", 3, 8),
+            min_child_samples=trial.suggest_int("lgbm_min_child_samples", 10, 50),
+            learning_rate=trial.suggest_float("lgbm_learning_rate", 0.01, 0.2, log=True),
+            num_leaves=trial.suggest_int("lgbm_num_leaves", 15, 63),
+            class_weight="balanced",
+            random_state=42,
+            verbose=-1,
+        )
+        m = VotingClassifier(
+            estimators=[("rf", rf), ("gb", gb), ("lgbm", lgbm)], voting="soft"
+        )
+        m.fit(X_train, y_train, sample_weight=sample_weight)
+
+        val_proba = m.predict_proba(X_val)[:, 1]
+        train_proba_tmp = m.predict_proba(X_train)[:, 1]
+        cal_tmp = np.percentile(train_proba_tmp, np.linspace(0, 100, 21)).tolist()
+        val_scores = calibrate_scores(val_proba, cal_tmp)
+        result = evaluate_threshold(
+            val_scores,
+            val_df["future_return"].to_numpy(),
+            DEFAULT_ML_BUY_THRESHOLD,
+            X_val,
+        )
+        return result["objective"]
+
+    print(f"\nOptunaでハイパーパラメータを最適化中 ({OPTUNA_N_TRIALS}試行)...")
+    study = optuna.create_study(direction="maximize")
+    study.optimize(objective, n_trials=OPTUNA_N_TRIALS, show_progress_bar=False)
+    best = study.best_params
+    print(f"最良パラメータ: {best}")
+
     rf = RandomForestClassifier(
-        n_estimators=100,
-        max_depth=5,
-        min_samples_leaf=20,
+        n_estimators=best["rf_n_estimators"],
+        max_depth=best["rf_max_depth"],
+        min_samples_leaf=best["rf_min_samples_leaf"],
         random_state=42,
         n_jobs=-1,
         class_weight="balanced",
     )
     gb = GradientBoostingClassifier(
-        n_estimators=100,
-        max_depth=3,
-        min_samples_leaf=20,
+        n_estimators=best["gb_n_estimators"],
+        max_depth=best["gb_max_depth"],
+        min_samples_leaf=best["gb_min_samples_leaf"],
+        learning_rate=best["gb_learning_rate"],
         random_state=42,
     )
     lgbm = LGBMClassifier(
-        n_estimators=200,
-        max_depth=5,
-        min_child_samples=20,
+        n_estimators=best["lgbm_n_estimators"],
+        max_depth=best["lgbm_max_depth"],
+        min_child_samples=best["lgbm_min_child_samples"],
+        learning_rate=best["lgbm_learning_rate"],
+        num_leaves=best["lgbm_num_leaves"],
         class_weight="balanced",
         random_state=42,
         verbose=-1,
@@ -677,8 +737,6 @@ def main():
         estimators=[("rf", rf), ("gb", gb), ("lgbm", lgbm)], voting="soft"
     )
     # GradientBoostingはclass_weightを持たないため、sample_weightで不均衡を補正する
-    # (RandomForestはclass_weight="balanced"と併用されるが、sample_weightにも従う)
-    sample_weight = compute_sample_weight(class_weight="balanced", y=y_train)
     model.fit(X_train, y_train, sample_weight=sample_weight)
 
     pred = model.predict(X_test)
@@ -770,6 +828,8 @@ def main():
                 "grid": THRESHOLD_GRID,
                 "metric": "val_avg_return_with_win_hit_bonus_dynamic_market_filters",
             },
+            "optuna_best_params": best,
+            "optuna_best_value": study.best_value,
         },
         MODEL_PATH,
     )
