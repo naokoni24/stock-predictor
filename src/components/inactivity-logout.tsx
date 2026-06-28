@@ -31,7 +31,9 @@ export function InactivityLogout() {
       signedOut = true;
       if (interval) clearInterval(interval);
       clearStoredSession();
-      await supabase.auth.signOut();
+      // scope:"local" はサーバーへの失効リクエスト(ネットワーク往復)を行わず、
+      // ローカルのCookie/セッションのみ即時クリアする。黒画面の時間を短縮する。
+      await supabase.auth.signOut({ scope: "local" });
       // クライアント遷移だと data-auth-expired が残りログイン画面まで隠れるため、
       // フルリロードで /login へ遷移する(隠したままログイン画面に切り替わる)。
       window.location.replace("/login");
@@ -60,16 +62,20 @@ export function InactivityLogout() {
       }
     };
 
-    const checkTimeout = async () => {
-      if (signedOut) return true;
+    // localStorageのタイムスタンプだけで同期判定する(getSession不要=即時に判定できる)
+    const isExpired = () => {
       const now = Date.now();
       const sessionStarted = Number(localStorage.getItem(SESSION_STARTED_KEY) ?? now);
       const lastActivity = Number(localStorage.getItem(LAST_ACTIVITY_KEY) ?? now);
+      return (
+        now - sessionStarted >= SESSION_LIMIT_MS ||
+        now - lastActivity >= INACTIVITY_LIMIT_MS
+      );
+    };
 
-      if (now - sessionStarted >= SESSION_LIMIT_MS) {
-        return signOutForTimeout();
-      }
-      if (now - lastActivity >= INACTIVITY_LIMIT_MS) {
+    const checkTimeout = async () => {
+      if (signedOut) return true;
+      if (isExpired()) {
         return signOutForTimeout();
       }
       // 期限内なら、描画前スクリプトが付けた非表示フラグを解除して表示する
@@ -85,6 +91,12 @@ export function InactivityLogout() {
       });
     };
 
+    // 期限切れなら getSession を待たず即サインアウト&遷移する(黒画面の時間を最短化)。
+    // 期限内のときだけセッション追跡を初期化する。
+    if (isExpired()) {
+      void signOutForTimeout();
+      return;
+    }
     void ensureSessionTracking().then(checkTimeout);
     ACTIVITY_EVENTS.forEach((event) =>
       window.addEventListener(event, updateLastActivity, { passive: true })

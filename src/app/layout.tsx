@@ -56,6 +56,22 @@ export default async function RootLayout({
             __html: `(function(){try{var p=location.pathname;if(p==='/login'||p==='/forgot-password'||p==='/reset-password')return;var s=localStorage.getItem('sessionStartedAt'),l=localStorage.getItem('lastActivityAt');if(!s||!l)return;var n=Date.now();if(n-Number(s)>=43200000||n-Number(l)>=900000){document.documentElement.setAttribute('data-auth-expired','');}}catch(e){}})();`,
           }}
         />
+        {/* 期限切れ時に表示する案内。通常はdisplay:noneで非表示(globals.css参照)。 */}
+        <div
+          id="auth-expired-overlay"
+          style={{
+            position: "fixed",
+            inset: 0,
+            alignItems: "center",
+            justifyContent: "center",
+            background: "var(--background)",
+            color: "var(--muted-foreground)",
+            fontSize: "0.875rem",
+            zIndex: 50,
+          }}
+        >
+          ログアウトしています…
+        </div>
         <ThemeProvider
           attribute="class"
           defaultTheme="dark"
