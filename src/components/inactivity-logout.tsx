@@ -30,9 +30,12 @@ export function InactivityLogout() {
       if (signedOut) return true;
       signedOut = true;
       if (interval) clearInterval(interval);
+      // 既に描画済みのタブに戻ってきた場合(focus/visibilitychange等)は描画前スクリプトが
+      // 走らないため、ここで即座にコンテンツを隠す。signOut/リロード完了まで旧画面を見せない。
+      document.documentElement.setAttribute("data-auth-expired", "");
       clearStoredSession();
       // scope:"local" はサーバーへの失効リクエスト(ネットワーク往復)を行わず、
-      // ローカルのCookie/セッションのみ即時クリアする。黒画面の時間を短縮する。
+      // ローカルのCookie/セッションのみ即時クリアする。遷移までの時間を短縮する。
       await supabase.auth.signOut({ scope: "local" });
       // クライアント遷移だと data-auth-expired が残りログイン画面まで隠れるため、
       // フルリロードで /login へ遷移する(隠したままログイン画面に切り替わる)。
