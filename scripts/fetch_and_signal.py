@@ -220,7 +220,6 @@ EARNINGS_BLOCK_DAYS_AFTER = 1
 
 def get_next_earnings_date(ticker: str):
     """次回決算日を返す。取得できない場合はNone"""
-    from datetime import date as date_type
     try:
         dates = yf.Ticker(ticker).earnings_dates
         if dates is None or dates.empty:
