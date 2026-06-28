@@ -5,7 +5,7 @@ import { createClient } from "@/lib/supabase-browser";
 
 // 一定時間操作がない場合に自動ログアウトする(Supabase Free Planでは
 // Inactivity timeoutが設定できないため、クライアント側で代替実装)
-const INACTIVITY_LIMIT_MS = 15 * 60 * 1000; // 15分
+const INACTIVITY_LIMIT_MS = 30 * 60 * 1000; // 30分
 const SESSION_LIMIT_MS = 12 * 60 * 60 * 1000; // ログインから最大12時間
 const LAST_ACTIVITY_KEY = "lastActivityAt";
 const SESSION_STARTED_KEY = "sessionStartedAt";

@@ -53,7 +53,7 @@ export default async function RootLayout({
             InactivityLogout がサインアウトして /login へ遷移するまでのチラ見えを防ぐ。 */}
         <script
           dangerouslySetInnerHTML={{
-            __html: `(function(){try{var p=location.pathname;if(p==='/login'||p==='/forgot-password'||p==='/reset-password')return;var s=localStorage.getItem('sessionStartedAt'),l=localStorage.getItem('lastActivityAt');if(!s||!l)return;var n=Date.now();if(n-Number(s)>=43200000||n-Number(l)>=900000){document.documentElement.setAttribute('data-auth-expired','');}}catch(e){}})();`,
+            __html: `(function(){try{var p=location.pathname;if(p==='/login'||p==='/forgot-password'||p==='/reset-password')return;var s=localStorage.getItem('sessionStartedAt'),l=localStorage.getItem('lastActivityAt');if(!s||!l)return;var n=Date.now();if(n-Number(s)>=43200000||n-Number(l)>=1800000){document.documentElement.setAttribute('data-auth-expired','');}}catch(e){}})();`,
           }}
         />
         <ThemeProvider
