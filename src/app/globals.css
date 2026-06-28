@@ -4,17 +4,9 @@
 @custom-variant dark (&:is(.dark *));
 
 /* 無操作/セッション期限切れ時、ログアウト遷移までコンテンツを隠してチラ見えを防ぐ
-   (描画前インラインスクリプトが html[data-auth-expired] を付与する)。
-   真っ黒な画面に見えないよう、案内オーバーレイを表示する。 */
-#auth-expired-overlay {
-  display: none;
-}
+   (描画前インラインスクリプトが html[data-auth-expired] を付与する) */
 html[data-auth-expired] body {
   visibility: hidden;
-}
-html[data-auth-expired] #auth-expired-overlay {
-  display: flex;
-  visibility: visible;
 }
 
 :root {
