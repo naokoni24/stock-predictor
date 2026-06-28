@@ -12,6 +12,8 @@ fetch_and_signal.py から読み込んで日次推論に利用する。
 実行: scripts/venv/bin/python scripts/train_model.py
 """
 
+import bisect
+
 import joblib
 import numpy as np
 import pandas as pd
@@ -32,6 +34,10 @@ OPTUNA_N_TRIALS = 30
 # N日後に株価がこの%以上上昇していたら「上昇」ラベル(1)とする
 HORIZON_DAYS = 5
 TARGET_RETURN = 0.02
+
+# 直近データを重視するサンプル重みの半減期(日)。小さいほど直近を重視する。
+# 2年分の学習データで365日なら、1年前のデータは重み0.5、2年前は0.25になる。
+RECENCY_HALFLIFE_DAYS = 365
 
 # 買い判定のしきい値候補。再学習時にテストデータのバックテスト成績で最適値を選ぶ。
 THRESHOLD_GRID = [round(x, 3) for x in [0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80]]
@@ -651,17 +657,44 @@ def main():
     dataset = dataset.sort_values("date").reset_index(drop=True)
     train_end = int(len(dataset) * 0.7)
     val_end = int(len(dataset) * 0.85)
+
+    # エンバーゴ: ラベルがHORIZON_DAYS営業日先のリターンを使うため、単純な時系列分割では
+    # 境界付近の学習行のラベルが検証/テスト期間の値動きに依存し、情報が漏れる(評価が甘くなる)。
+    # 各境界の手前HORIZON_DAYS営業日分を除外し、分割の間に空白期間を設けて漏れを防ぐ。
+    unique_dates = sorted(dataset["date"].unique().tolist())
+
+    def embargo_cutoff(boundary_date):
+        """boundary_date のHORIZON_DAYS営業日前の日付を返す(これ以降の行を境界手前から除外)"""
+        idx = bisect.bisect_left(unique_dates, boundary_date)
+        return unique_dates[max(idx - HORIZON_DAYS, 0)]
+
+    val_start_date = dataset.iloc[train_end]["date"]
+    test_start_date = dataset.iloc[val_end]["date"]
+    train_cutoff = embargo_cutoff(val_start_date)
+    val_cutoff = embargo_cutoff(test_start_date)
+
     train_df = dataset.iloc[:train_end]
+    train_df = train_df[train_df["date"] < train_cutoff]
     val_df = dataset.iloc[train_end:val_end]
+    val_df = val_df[val_df["date"] < val_cutoff]
     test_df = dataset.iloc[val_end:]
     print(f"学習データ: {train_df['date'].min()} 〜 {train_df['date'].max()} ({len(train_df)}行)")
     print(f"検証データ: {val_df['date'].min()} 〜 {val_df['date'].max()} ({len(val_df)}行)")
     print(f"テストデータ: {test_df['date'].min()} 〜 {test_df['date'].max()} ({len(test_df)}行)")
+    print(f"エンバーゴ: 学習<{train_cutoff} / 検証<{val_cutoff} (各境界 {HORIZON_DAYS}営業日を除外)")
 
     X_train, y_train = train_df[feature_columns], train_df["label"]
     X_val, y_val = val_df[feature_columns], val_df["label"]
     X_test, y_test = test_df[feature_columns], test_df["label"]
-    sample_weight = compute_sample_weight(class_weight="balanced", y=y_train)
+
+    # 直近データを重視するサンプル重み(指数減衰)。地合いの変化に追従しやすくする。
+    # クラス不均衡補正(balanced)に、新しいデータほど大きい係数を掛け合わせる。
+    train_age_days = (
+        pd.to_datetime(train_df["date"].max()) - pd.to_datetime(train_df["date"])
+    ).dt.days.to_numpy()
+    recency_weight = 0.5 ** (train_age_days / RECENCY_HALFLIFE_DAYS)
+    sample_weight = compute_sample_weight(class_weight="balanced", y=y_train) * recency_weight
+    print(f"直近重み付け: 半減期{RECENCY_HALFLIFE_DAYS}日 / 最古データ重み {recency_weight.min():.3f}")
 
     def objective(trial: optuna.Trial) -> float:
         """検証データの平均リターン(買いシグナル時)を最大化するハイパーパラメータを探索"""
@@ -832,6 +865,10 @@ def main():
                 "target_return": TARGET_RETURN,
                 "grid": THRESHOLD_GRID,
                 "metric": "val_avg_return_with_win_hit_bonus_dynamic_market_filters",
+            },
+            "training_config": {
+                "embargo_days": HORIZON_DAYS,
+                "recency_halflife_days": RECENCY_HALFLIFE_DAYS,
             },
             "optuna_best_params": best,
             "optuna_best_value": study.best_value,
