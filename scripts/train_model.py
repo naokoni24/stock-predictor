@@ -28,8 +28,8 @@ from lightgbm import LGBMClassifier
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
-# Optunaの試行回数。月次再学習はGitHub Actions上で動くため、実行時間を抑える値にする。
-OPTUNA_N_TRIALS = 30
+# Optunaの試行回数。月次再学習はGitHub Actions上(2コア)で動くため、実行時間を抑える値にする。
+OPTUNA_N_TRIALS = 20
 
 # N日後に株価がこの%以上上昇していたら「上昇」ラベル(1)とする
 HORIZON_DAYS = 5
@@ -694,29 +694,40 @@ def main():
     sample_weight = compute_sample_weight(class_weight="balanced", y=y_train) * recency_weight
     print(f"直近重み付け: 半減期{RECENCY_HALFLIFE_DAYS}日 / 最古データ重み {recency_weight.min():.3f}")
 
+    # Optunaの各試行で変わるのはモデルだけ。買わないフィルターと相場別しきい値調整は
+    # 特徴量だけで決まりモデルに依存しないため、ここで一度だけ計算して試行内の再計算を避ける。
+    # (以前は試行ごとに行単位のpandas処理を繰り返し、再学習が極端に遅くなっていた)
+    val_future = val_df["future_return"].to_numpy()
+    val_blocked = X_val.apply(is_ml_buy_blocked, axis=1).to_numpy(dtype=bool)
+    val_adj_thresholds = np.array(
+        [adjusted_ml_buy_threshold(DEFAULT_ML_BUY_THRESHOLD, row) for _, row in X_val.iterrows()]
+    )
+    cal_percentiles = np.linspace(0, 100, 21)
+
     def objective(trial: optuna.Trial) -> float:
-        """検証データの平均リターン(買いシグナル時)を最大化するハイパーパラメータを探索"""
+        """検証データの平均リターン(買いシグナル時)を最大化するハイパーパラメータを探索。
+        モデル非依存の前計算(val_blocked / val_adj_thresholds)を使い高速に評価する。"""
         rf = RandomForestClassifier(
-            n_estimators=trial.suggest_int("rf_n_estimators", 50, 300),
-            max_depth=trial.suggest_int("rf_max_depth", 3, 8),
+            n_estimators=trial.suggest_int("rf_n_estimators", 80, 200),
+            max_depth=trial.suggest_int("rf_max_depth", 3, 7),
             min_samples_leaf=trial.suggest_int("rf_min_samples_leaf", 10, 50),
             random_state=42,
             n_jobs=-1,
             class_weight="balanced",
         )
         gb = GradientBoostingClassifier(
-            n_estimators=trial.suggest_int("gb_n_estimators", 50, 200),
-            max_depth=trial.suggest_int("gb_max_depth", 2, 5),
+            n_estimators=trial.suggest_int("gb_n_estimators", 50, 150),
+            max_depth=trial.suggest_int("gb_max_depth", 2, 4),
             min_samples_leaf=trial.suggest_int("gb_min_samples_leaf", 10, 50),
-            learning_rate=trial.suggest_float("gb_learning_rate", 0.01, 0.2, log=True),
+            learning_rate=trial.suggest_float("gb_learning_rate", 0.02, 0.2, log=True),
             random_state=42,
         )
         lgbm = LGBMClassifier(
-            n_estimators=trial.suggest_int("lgbm_n_estimators", 100, 400),
-            max_depth=trial.suggest_int("lgbm_max_depth", 3, 8),
+            n_estimators=trial.suggest_int("lgbm_n_estimators", 100, 300),
+            max_depth=trial.suggest_int("lgbm_max_depth", 3, 7),
             min_child_samples=trial.suggest_int("lgbm_min_child_samples", 10, 50),
-            learning_rate=trial.suggest_float("lgbm_learning_rate", 0.01, 0.2, log=True),
-            num_leaves=trial.suggest_int("lgbm_num_leaves", 15, 63),
+            learning_rate=trial.suggest_float("lgbm_learning_rate", 0.02, 0.2, log=True),
+            num_leaves=trial.suggest_int("lgbm_num_leaves", 15, 48),
             class_weight="balanced",
             random_state=42,
             verbose=-1,
@@ -726,17 +737,19 @@ def main():
         )
         m.fit(X_train, y_train, sample_weight=sample_weight)
 
-        val_proba = m.predict_proba(X_val)[:, 1]
-        train_proba_tmp = m.predict_proba(X_train)[:, 1]
-        cal_tmp = np.percentile(train_proba_tmp, np.linspace(0, 100, 21)).tolist()
-        val_scores = calibrate_scores(val_proba, cal_tmp)
-        result = evaluate_threshold(
-            val_scores,
-            val_df["future_return"].to_numpy(),
-            DEFAULT_ML_BUY_THRESHOLD,
-            X_val,
-        )
-        return result["objective"]
+        # 学習データの予測確率分布で較正し、検証スコアを0〜1へ変換(calibrate_scoresと同等処理)
+        cal_tmp = np.percentile(m.predict_proba(X_train)[:, 1], cal_percentiles)
+        val_scores = np.interp(m.predict_proba(X_val)[:, 1], cal_tmp, cal_percentiles / 100)
+
+        mask = (val_scores >= val_adj_thresholds) & ~val_blocked
+        selected = val_future[mask]
+        if selected.size == 0:
+            return float("-inf")
+        avg_return = float(selected.mean())
+        win_rate = float((selected > 0).mean())
+        hit_rate = float((selected >= TARGET_RETURN).mean())
+        # evaluate_threshold と同じ目的関数(平均リターン + 勝率/的中率の小ボーナス)
+        return avg_return + win_rate * 0.005 + hit_rate * 0.005
 
     print(f"\nOptunaでハイパーパラメータを最適化中 ({OPTUNA_N_TRIALS}試行)...")
     study = optuna.create_study(direction="maximize")
