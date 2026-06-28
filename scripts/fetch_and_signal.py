@@ -191,6 +191,47 @@ def calc_bollinger(close: pd.Series, period: int = 20, num_std: float = 2.0) -> 
     return sma + num_std * std, sma - num_std * std
 
 
+def calc_adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> tuple[pd.Series, pd.Series]:
+    """ADX(トレンド強度 0〜100)とDI差分(正=上昇トレンド)を返す"""
+    prev_high = high.shift(1)
+    prev_low = low.shift(1)
+    prev_close = close.shift(1)
+    up_move = high - prev_high
+    down_move = prev_low - low
+    dm_plus = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
+    dm_minus = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
+    tr = pd.concat([
+        high - low,
+        (high - prev_close).abs(),
+        (low - prev_close).abs(),
+    ], axis=1).max(axis=1)
+    smoothed_tr = tr.ewm(span=period, adjust=False).mean()
+    di_plus = 100 * dm_plus.ewm(span=period, adjust=False).mean() / smoothed_tr
+    di_minus = 100 * dm_minus.ewm(span=period, adjust=False).mean() / smoothed_tr
+    dx = 100 * (di_plus - di_minus).abs() / (di_plus + di_minus).replace(0, np.nan)
+    adx = dx.ewm(span=period, adjust=False).mean()
+    return adx, di_plus - di_minus
+
+
+# 決算前後N日は誤シグナルを避けるためML買いをブロックする
+EARNINGS_BLOCK_DAYS_BEFORE = 3
+EARNINGS_BLOCK_DAYS_AFTER = 1
+
+
+def get_next_earnings_date(ticker: str):
+    """次回決算日を返す。取得できない場合はNone"""
+    from datetime import date as date_type
+    try:
+        dates = yf.Ticker(ticker).earnings_dates
+        if dates is None or dates.empty:
+            return None
+        today = datetime.now(timezone.utc).date()
+        future = [d.date() for d in dates.index if d.date() >= today]
+        return min(future) if future else None
+    except Exception:
+        return None
+
+
 JPX_LIST_URL = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls"
 
 
@@ -498,6 +539,17 @@ def main():
             feature_frames.get(ticker),
             news_sentiment.get(ticker, 0.0),
         )
+
+        # 決算前後フィルター: 買い候補のみ決算日を確認してブロック
+        if ml_signal == "buy_candidate":
+            earnings_date = get_next_earnings_date(ticker)
+            if earnings_date:
+                today_jst = datetime.now(timezone(timedelta(hours=9))).date()
+                days_to_earnings = (earnings_date - today_jst).days
+                if -EARNINGS_BLOCK_DAYS_AFTER <= days_to_earnings <= EARNINGS_BLOCK_DAYS_BEFORE:
+                    print(f"ML buy blocked: 決算前後 {earnings_date} (D{days_to_earnings:+d}) {ticker}")
+                    ml_signal = "hold"
+
         sb.table("signals").upsert(
             {
                 "ticker": ticker,

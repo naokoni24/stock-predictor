@@ -18,7 +18,7 @@ import pandas as pd
 import yfinance as yf
 import optuna
 
-from fetch_and_signal import TICKERS, calc_rsi, calc_macd, calc_bollinger, get_screener_tickers, get_jp_sector_map
+from fetch_and_signal import TICKERS, calc_rsi, calc_macd, calc_bollinger, calc_adx, get_screener_tickers, get_jp_sector_map
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier
 from sklearn.metrics import accuracy_score, classification_report
 from sklearn.utils.class_weight import compute_sample_weight
@@ -105,6 +105,8 @@ BASE_FEATURE_COLUMNS = [
     "range_expansion_20d",
     "relative_strength_5d",
     "price_position_52w",
+    "adx_14",
+    "di_diff_14",
 ]
 
 FEATURE_COLUMNS = BASE_FEATURE_COLUMNS + MARKET_FEATURE_COLUMNS + SECTOR_FEATURE_COLUMNS
@@ -496,6 +498,9 @@ def build_features(hist: pd.DataFrame, nikkei: pd.DataFrame | None = None) -> pd
     low_52w = df["Close"].rolling(252, min_periods=60).min()
     high_52w = df["Close"].rolling(252, min_periods=60).max()
     df["price_position_52w"] = (df["Close"] - low_52w) / (high_52w - low_52w)
+
+    # ADX: トレンドの強さ(0〜100)とDI差分(正=上昇トレンド、負=下落トレンド)
+    df["adx_14"], df["di_diff_14"] = calc_adx(df["High"], df["Low"], df["Close"])
 
     # 市場環境データを結合し、日経平均に対する相対強弱も算出する
     if nikkei is not None:
