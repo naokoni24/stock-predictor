@@ -136,8 +136,6 @@ def sector_default_value() -> float:
 
 def calibrate_scores(raw_scores, calibration_values: list[float] | None):
     """学習済みの分位点テーブルを使い、予測確率を0〜1の相対スコアに変換する"""
-    import numpy as np
-
     if not calibration_values:
         return raw_scores
     percentiles = [p / 100 for p in range(0, 101, 5)]
@@ -792,8 +790,6 @@ def main():
     # 学習データでの予測確率の分位点を保存し、推論時に0〜1へ較正し直す。
     # これにより「50%」が平均的な銘柄、両端が相対的に強気/弱気な銘柄を表すようになる。
     # (テスト/検証データを混ぜると評価リークになるため学習データのみを使用)
-    import numpy as np
-
     train_proba = model.predict_proba(X_train)[:, 1]
     calibration_percentiles = np.linspace(0, 100, 21)
     calibration_values = np.percentile(train_proba, calibration_percentiles).tolist()
