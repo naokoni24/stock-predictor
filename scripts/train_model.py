@@ -47,6 +47,10 @@ MAX_ADJUSTED_ML_BUY_THRESHOLD = 0.80
 MIN_SECTOR_THRESHOLD_ROWS = 120
 MIN_SECTOR_THRESHOLD_TRADES = 10
 
+# 特徴量選択: 正規化gain重要度がこの割合未満の特徴量を除外する(過学習・ノイズ削減)。
+# 環境変数 SELECT_FEATURES=0 で無効化できる(A/B比較用)。
+MIN_FEATURE_IMPORTANCE = 0.001
+
 MARKET_INDICES = {
     "nikkei": ["^N225"],
     # yfinanceではTOPIX指数が空になることがあるため、無料で取得できるTOPIX連動ETFを代替に使う。
@@ -132,6 +136,33 @@ def market_default_value(column: str) -> float:
 def sector_default_value() -> float:
     """業種別データが欠けた時に使う中立値"""
     return 0.0
+
+
+def select_features(X_train, y_train, candidate_columns, sample_weight=None) -> list[str]:
+    """学習データのLGBM gain重要度をもとに寄与の小さい特徴量を除外する。
+    テスト/検証データを使わずtrainのみで選定し、評価リークを避ける。"""
+    candidate_columns = list(candidate_columns)
+    selector = LGBMClassifier(
+        n_estimators=200,
+        max_depth=5,
+        min_child_samples=20,
+        class_weight="balanced",
+        random_state=42,
+        verbose=-1,
+        importance_type="gain",
+    )
+    selector.fit(X_train[candidate_columns], y_train, sample_weight=sample_weight)
+    importances = np.asarray(selector.feature_importances_, dtype=float)
+    total = importances.sum()
+    if total <= 0:
+        return candidate_columns
+    norm = importances / total
+    selected = [c for c, imp in zip(candidate_columns, norm) if imp >= MIN_FEATURE_IMPORTANCE]
+    # 安全策: 極端に少なくなった場合は重要度上位30件にフォールバックする
+    if len(selected) < 10:
+        top_idx = sorted(np.argsort(norm)[::-1][:30])
+        selected = [candidate_columns[i] for i in top_idx]
+    return selected
 
 
 def calibrate_scores(raw_scores, calibration_values: list[float] | None):
@@ -694,13 +725,24 @@ def main():
     sample_weight = compute_sample_weight(class_weight="balanced", y=y_train) * recency_weight
     print(f"直近重み付け: 半減期{RECENCY_HALFLIFE_DAYS}日 / 最古データ重み {recency_weight.min():.3f}")
 
+    # 特徴量選択: 寄与の小さい特徴量を除外して過学習・ノイズを減らす(trainのみで選定)。
+    # 買わないフィルターは元の全特徴量を参照するため、モデルが使う列だけを絞る。
+    all_feature_columns = feature_columns
+    if os.getenv("SELECT_FEATURES", "1") != "0":
+        feature_columns = select_features(X_train, y_train, feature_columns, sample_weight)
+        print(f"特徴量選択: {len(all_feature_columns)} -> {len(feature_columns)} 列を採用")
+        X_train = train_df[feature_columns]
+        X_val = val_df[feature_columns]
+        X_test = test_df[feature_columns]
+
     # Optunaの各試行で変わるのはモデルだけ。買わないフィルターと相場別しきい値調整は
     # 特徴量だけで決まりモデルに依存しないため、ここで一度だけ計算して試行内の再計算を避ける。
     # (以前は試行ごとに行単位のpandas処理を繰り返し、再学習が極端に遅くなっていた)
+    # フィルターは元の全特徴量を参照するため、選択後のX_valではなく全列のval_dfを使う。
     val_future = val_df["future_return"].to_numpy()
-    val_blocked = X_val.apply(is_ml_buy_blocked, axis=1).to_numpy(dtype=bool)
+    val_blocked = val_df.apply(is_ml_buy_blocked, axis=1).to_numpy(dtype=bool)
     val_adj_thresholds = np.array(
-        [adjusted_ml_buy_threshold(DEFAULT_ML_BUY_THRESHOLD, row) for _, row in X_val.iterrows()]
+        [adjusted_ml_buy_threshold(DEFAULT_ML_BUY_THRESHOLD, row) for _, row in val_df.iterrows()]
     )
     cal_percentiles = np.linspace(0, 100, 21)
 
@@ -810,30 +852,31 @@ def main():
           f"{calibration_values[0]:.3f} / {calibration_values[5]:.3f} / "
           f"{calibration_values[10]:.3f} / {calibration_values[15]:.3f} / {calibration_values[-1]:.3f}")
 
-    # しきい値の最適化は検証データで行い、テストデータは最終評価専用にする
+    # しきい値の最適化は検証データで行い、テストデータは最終評価専用にする。
+    # モデルのスコアは選択後の特徴量で算出し、フィルター判定は全特徴量のval_df/test_dfを渡す。
     val_raw_proba = model.predict_proba(val_df[feature_columns])[:, 1]
     val_scores = calibrate_scores(val_raw_proba, calibration_values)
     ml_buy_threshold, threshold_results = optimize_ml_buy_threshold(
         val_scores,
         val_df["future_return"].to_numpy(),
-        val_df[feature_columns],
+        val_df,
     )
     sector_ml_buy_thresholds, sector_threshold_results = optimize_sector_thresholds(
         ml_buy_threshold,
         val_scores,
         val_df["future_return"].to_numpy(),
-        val_df[feature_columns],
+        val_df,
         val_df["sector_label"],
     )
 
     # テストデータ(完全に未使用のデータ)でしきい値の最終評価を行う
-    test_raw_proba = model.predict_proba(X_test)[:, 1]
+    test_raw_proba = model.predict_proba(test_df[feature_columns])[:, 1]
     test_scores = calibrate_scores(test_raw_proba, calibration_values)
     test_eval = evaluate_threshold(
         test_scores,
         test_df["future_return"].to_numpy(),
         ml_buy_threshold,
-        test_df[feature_columns],
+        test_df,
         test_df["sector_label"],
         sector_ml_buy_thresholds,
     )
@@ -878,6 +921,8 @@ def main():
             "training_config": {
                 "embargo_days": HORIZON_DAYS,
                 "recency_halflife_days": RECENCY_HALFLIFE_DAYS,
+                "selected_feature_count": len(feature_columns),
+                "total_feature_count": len(all_feature_columns),
             },
             "optuna_best_params": best,
             "optuna_best_value": study.best_value,

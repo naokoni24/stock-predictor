@@ -32,6 +32,7 @@ from train_model import (
     FEATURE_COLUMNS,
     HORIZON_DAYS,
     MODEL_PATH,
+    RECENCY_HALFLIFE_DAYS,
     TARGET_RETURN,
     THRESHOLD_GRID,
 )
@@ -303,16 +304,19 @@ def run_walk_forward_evaluation(dataset: pd.DataFrame, sector_columns: list[str]
         print("\n月次walk-forward評価 (全評価月):")
     print(
         f"{'評価月':>8} {'train':>7} {'val':>6} {'test':>6} "
-        f"{'thr':>5} {'ML件数':>7} {'ML平均':>8} {'一致件数':>8} {'一致平均':>9}"
+        f"{'thr':>5} {'ML件数':>7} {'ML勝率':>7} {'ML平均':>8} {'一致件数':>8} {'一致平均':>9}"
     )
 
+    embargo = pd.offsets.BDay(HORIZON_DAYS)
     for period in periods:
         test_start = period.to_timestamp()
         test_end = (period + 1).to_timestamp()
         val_start = test_start - pd.DateOffset(months=WALK_FORWARD_VALIDATION_MONTHS)
 
-        train_df = dataset[dataset["date"] < val_start]
-        val_df = dataset[(dataset["date"] >= val_start) & (dataset["date"] < test_start)]
+        # エンバーゴ: 5営業日先ラベルが境界をまたいで漏れるのを防ぐため、
+        # train/val の各末尾HORIZON_DAYS営業日を除外する(train_model.pyと同じ思想)。
+        train_df = dataset[dataset["date"] < (val_start - embargo)]
+        val_df = dataset[(dataset["date"] >= val_start) & (dataset["date"] < (test_start - embargo))]
         test_df = dataset[(dataset["date"] >= test_start) & (dataset["date"] < test_end)]
         if (
             len(train_df) < WALK_FORWARD_MIN_TRAIN_ROWS
@@ -323,7 +327,12 @@ def run_walk_forward_evaluation(dataset: pd.DataFrame, sector_columns: list[str]
             continue
 
         model = make_walk_forward_model()
-        sample_weight = compute_sample_weight(class_weight="balanced", y=train_df["label"])
+        # 本番(train_model.py)と同じく直近データを重視するサンプル重みを掛ける
+        train_age_days = (train_df["date"].max() - train_df["date"]).dt.days.to_numpy()
+        recency_weight = 0.5 ** (train_age_days / RECENCY_HALFLIFE_DAYS)
+        sample_weight = (
+            compute_sample_weight(class_weight="balanced", y=train_df["label"]) * recency_weight
+        )
         model.fit(train_df[feature_columns], train_df["label"], sample_weight=sample_weight)
 
         train_proba = model.predict_proba(train_df[feature_columns])[:, 1]
@@ -375,6 +384,11 @@ def run_walk_forward_evaluation(dataset: pd.DataFrame, sector_columns: list[str]
         fold_results.append(test_eval)
 
         ml_avg = sum(fold_ml_returns) / len(fold_ml_returns) if fold_ml_returns else 0.0
+        ml_win = (
+            sum(1 for r in fold_ml_returns if r > 0) / len(fold_ml_returns) * 100
+            if fold_ml_returns
+            else 0.0
+        )
         consensus_avg = (
             sum(fold_consensus_returns) / len(fold_consensus_returns)
             if fold_consensus_returns
@@ -382,7 +396,7 @@ def run_walk_forward_evaluation(dataset: pd.DataFrame, sector_columns: list[str]
         )
         print(
             f"{period} {len(train_df):>7} {len(val_df):>6} {len(test_df):>6} "
-            f"{threshold:>5.2f} {len(fold_ml_returns):>7} {ml_avg:>7.2f}% "
+            f"{threshold:>5.2f} {len(fold_ml_returns):>7} {ml_win:>6.1f}% {ml_avg:>7.2f}% "
             f"{len(fold_consensus_returns):>8} {consensus_avg:>8.2f}%"
         )
 
