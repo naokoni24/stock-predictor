@@ -13,6 +13,9 @@ import { cn, getCloseLabel } from "@/lib/utils";
 const LOSS_ALERT_THRESHOLD = -10;
 const GAIN_ALERT_THRESHOLD = 15;
 
+// 推奨損切り幅（取得単価からの下落率）。バックテストで-8%が好成績(リターン維持しつつ最大DD/最悪トレード削減)。
+const STOP_LOSS_PCT = 0.08;
+
 function riskLevel(rsi14: number | null, profitRate: number | null) {
   let score = 30;
   if (rsi14 != null) {
@@ -74,6 +77,10 @@ export default async function HoldingsPage({
     const costValue = h.cost_price * h.shares;
     const profitAmount = marketValue != null ? marketValue - costValue : null;
 
+    // 推奨損切り価格（取得単価 -8%）。現在値が割っていれば到達フラグを立てる。
+    const stopLossPrice = h.cost_price * (1 - STOP_LOSS_PCT);
+    const stopLossHit = currentPrice != null && currentPrice <= stopLossPrice;
+
     return {
       ...h,
       stockName,
@@ -83,6 +90,8 @@ export default async function HoldingsPage({
       profitAmount,
       marketValue,
       costValue,
+      stopLossPrice,
+      stopLossHit,
       signal: latest?.signal ?? null,
       risk: riskLevel(latest?.rsi14 ?? null, profitRate),
     };
@@ -218,6 +227,15 @@ export default async function HoldingsPage({
                 {h.currentPrice != null && (
                   <> / {h.currentPriceDate ? getCloseLabel(h.currentPriceDate) : "前日終値"} ¥{h.currentPrice.toLocaleString()}</>
                 )}
+              </p>
+              <p
+                className={cn(
+                  "text-xs mt-0.5 tabular-nums",
+                  h.stopLossHit ? "text-bearish font-medium" : "text-muted-foreground"
+                )}
+              >
+                推奨損切り ¥{Math.round(h.stopLossPrice).toLocaleString()}（取得単価-8%）
+                {h.stopLossHit && " ・到達"}
               </p>
             </div>
 
