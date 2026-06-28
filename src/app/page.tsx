@@ -17,6 +17,9 @@ const SIGNAL_LABEL: Record<string, string> = {
   hold: "様子見",
 };
 
+// 推奨損切り幅（エントリー=現在値からの下落率）。バックテストで-8%が好成績だったため。
+const STOP_LOSS_PCT = 0.08;
+
 type Row = {
   ticker: string;
   date: string;
@@ -166,6 +169,11 @@ function WatchlistRow({ s, signalType }: { s: Row; signalType: string }) {
               ※AI予測は{aiSentimentLabel(s.ml_score)}です
             </span>
           )
+        )}
+        {signalType === "buy_candidate" && s.close != null && (
+          <span className="text-[10px] text-muted-foreground tabular-nums">
+            推奨損切り ¥{Math.round(s.close * (1 - STOP_LOSS_PCT)).toLocaleString()}（-8%）
+          </span>
         )}
       </div>
 
