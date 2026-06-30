@@ -23,6 +23,9 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "AI Stock Signal | 株価予測ダッシュボード",
   description: "本日のおすすめ株と保有株の売り時をAIでチェック",
+  appleWebApp: {
+    title: "AI Stock Signal",
+  },
 };
 
 export const viewport: Viewport = {
