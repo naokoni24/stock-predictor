@@ -377,6 +377,7 @@ def run_walk_forward_evaluation(dataset: pd.DataFrame, sector_columns: list[str]
             val_scores,
             val_df["future_return"].to_numpy(),
             val_df[feature_columns],
+            dates=val_df["date"],
         )
         sector_thresholds, _ = optimize_sector_thresholds(
             threshold,
@@ -384,6 +385,7 @@ def run_walk_forward_evaluation(dataset: pd.DataFrame, sector_columns: list[str]
             val_df["future_return"].to_numpy(),
             val_df[feature_columns],
             val_df["sector_label"],
+            dates=val_df["date"],
         )
 
         test_raw_proba = model.predict_proba(test_df[feature_columns])[:, 1]

@@ -56,6 +56,14 @@ ENSEMBLE_SEEDS = [42, 202, 777]
 
 # 買い判定のしきい値候補。再学習時にテストデータのバックテスト成績で最適値を選ぶ。
 THRESHOLD_GRID = [round(x, 3) for x in [0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80]]
+
+# しきい値の安定性評価: 検証期間をサブ期間に分割し、
+# 「サブ期間objectiveの平均 − ペナルティ×標準偏差」が最大のしきい値を選ぶ。
+# 単一の検証期間全体の成績だけで選ぶと、その期間の地合いに過適合したしきい値
+# (あるサブ期間だけ極端に良い)が選ばれることがあるため(2026-07の0.80過適合の教訓)。
+# サブ期間の取引数が下限未満のしきい値は評価が不安定として選考から除外する。
+THRESHOLD_STABILITY_SPLITS = 3
+THRESHOLD_STABILITY_STD_PENALTY = 1.0
 DEFAULT_ML_BUY_THRESHOLD = 0.55
 MIN_ADJUSTED_ML_BUY_THRESHOLD = 0.50
 MAX_ADJUSTED_ML_BUY_THRESHOLD = 0.80
@@ -516,28 +524,101 @@ def evaluate_threshold(
     }
 
 
+def add_stability_metrics(
+    result: dict,
+    scores,
+    future_returns,
+    threshold: float,
+    feature_rows: pd.DataFrame | None,
+    dates,
+    min_trades: int,
+) -> None:
+    """しきい値の成績をサブ期間ごとに評価し、resultへ安定性指標を追記する。
+
+    - sub_periods: 各サブ期間の取引数・平均リターン・objective
+    - stable: 全サブ期間で最低取引数を満たすか
+    - stability_objective: 安定な場合のみ、サブ期間objectiveの平均 − ペナルティ×標準偏差
+    """
+    date_values = np.asarray(pd.Series(dates).to_numpy())
+    unique_dates = np.array(sorted(pd.unique(date_values)))
+    if len(unique_dates) < THRESHOLD_STABILITY_SPLITS * 2:
+        return  # 期間が短すぎて分割評価できない
+
+    scores = np.asarray(scores)
+    future_returns = np.asarray(future_returns)
+    min_sub_trades = max(5, min_trades // (THRESHOLD_STABILITY_SPLITS * 2))
+
+    sub_periods = []
+    for chunk in np.array_split(unique_dates, THRESHOLD_STABILITY_SPLITS):
+        mask = np.isin(date_values, chunk)
+        sub_eval = evaluate_threshold(
+            scores[mask],
+            future_returns[mask],
+            threshold,
+            None if feature_rows is None else feature_rows.iloc[mask],
+        )
+        sub_periods.append(
+            {
+                "start": str(chunk[0]),
+                "end": str(chunk[-1]),
+                "trades": sub_eval["trades"],
+                "avg_return": sub_eval["avg_return"],
+                "objective": sub_eval["objective"],
+            }
+        )
+
+    result["sub_periods"] = sub_periods
+    stable = all(s["trades"] >= min_sub_trades for s in sub_periods)
+    result["stable"] = stable
+    if stable:
+        objectives = np.array([s["objective"] for s in sub_periods])
+        result["stability_objective"] = float(
+            objectives.mean() - THRESHOLD_STABILITY_STD_PENALTY * objectives.std()
+        )
+
+
 def optimize_ml_buy_threshold(
     scores,
     future_returns,
     feature_rows: pd.DataFrame | None = None,
     min_trades: int | None = None,
+    dates=None,
 ) -> tuple[float, list[dict]]:
-    """検証データで買い判定しきい値を自動最適化する"""
+    """検証データで買い判定しきい値を自動最適化する。
+
+    datesを渡すと検証期間をサブ期間に分割した安定性評価を行い、
+    全サブ期間で取引数を確保でき「平均objective − ばらつきペナルティ」が
+    最大のしきい値を選ぶ(単一の地合いへの過適合を防ぐ)。
+    安定なしきい値が1つも無い場合は従来通り全期間objectiveで選ぶ。
+    """
     min_trades = min_trades if min_trades is not None else max(30, int(len(scores) * 0.02))
-    results = [
-        evaluate_threshold(scores, future_returns, threshold, feature_rows)
-        for threshold in THRESHOLD_GRID
-    ]
+    results = []
+    for threshold in THRESHOLD_GRID:
+        result = evaluate_threshold(scores, future_returns, threshold, feature_rows)
+        if dates is not None and result["trades"] >= min_trades:
+            add_stability_metrics(
+                result, scores, future_returns, threshold, feature_rows, dates, min_trades
+            )
+        results.append(result)
     valid_results = [r for r in results if r["trades"] >= min_trades]
 
     if not valid_results:
         print(f"しきい値最適化: 取引数が少ないためデフォルト {DEFAULT_ML_BUY_THRESHOLD} を使用")
         return DEFAULT_ML_BUY_THRESHOLD, results
 
-    best = max(
-        valid_results,
-        key=lambda r: (r["objective"], r["avg_return"], r["win_rate"], r["trades"]),
-    )
+    stable_results = [r for r in valid_results if r.get("stability_objective") is not None]
+    if stable_results:
+        best = max(
+            stable_results,
+            key=lambda r: (r["stability_objective"], r["objective"], r["avg_return"], r["trades"]),
+        )
+    else:
+        if dates is not None:
+            print("しきい値最適化: 安定なしきい値が無いため全期間成績で選択")
+        best = max(
+            valid_results,
+            key=lambda r: (r["objective"], r["avg_return"], r["win_rate"], r["trades"]),
+        )
     return float(best["threshold"]), results
 
 
@@ -547,12 +628,18 @@ def optimize_sector_thresholds(
     future_returns,
     feature_rows: pd.DataFrame,
     sectors: pd.Series,
+    dates=None,
 ) -> tuple[dict[str, float], dict[str, dict]]:
-    """業種ごとに、共通しきい値より良い場合だけ専用しきい値を採用する"""
+    """業種ごとに、共通しきい値より良い場合だけ専用しきい値を採用する。
+
+    datesを渡した場合はサブ期間の安定性指標で共通しきい値と比較し、
+    安定性を評価できない業種は個別しきい値を採用しない(過適合防止のため厳格化)。
+    """
     sector_thresholds: dict[str, float] = {}
     sector_results: dict[str, dict] = {}
     score_series = pd.Series(scores, index=feature_rows.index)
     return_series = pd.Series(future_returns, index=feature_rows.index)
+    date_series = None if dates is None else pd.Series(list(dates), index=feature_rows.index)
 
     for sector, sector_index in sectors.groupby(sectors).groups.items():
         if sector == "不明" or len(sector_index) < MIN_SECTOR_THRESHOLD_ROWS:
@@ -561,6 +648,7 @@ def optimize_sector_thresholds(
         sector_features = feature_rows.loc[sector_index]
         sector_scores = score_series.loc[sector_index].to_numpy()
         sector_returns = return_series.loc[sector_index].to_numpy()
+        sector_dates = None if date_series is None else date_series.loc[sector_index]
         min_trades = max(MIN_SECTOR_THRESHOLD_TRADES, int(len(sector_features) * 0.03))
 
         global_eval = evaluate_threshold(
@@ -569,18 +657,38 @@ def optimize_sector_thresholds(
             base_threshold,
             sector_features,
         )
+        if sector_dates is not None and global_eval["trades"] >= min_trades:
+            add_stability_metrics(
+                global_eval,
+                sector_scores,
+                sector_returns,
+                base_threshold,
+                sector_features,
+                sector_dates,
+                min_trades,
+            )
         threshold, results = optimize_ml_buy_threshold(
             sector_scores,
             sector_returns,
             sector_features,
             min_trades=min_trades,
+            dates=sector_dates,
         )
         best_eval = next((r for r in results if r["threshold"] == threshold), None)
         if best_eval is None or best_eval["trades"] < min_trades:
             continue
 
         # 共通しきい値より検証目的関数が良い業種だけ採用し、過剰な業種別最適化を避ける。
-        if best_eval["objective"] > global_eval["objective"] and threshold != base_threshold:
+        # 安定性指標があるときはそれで比較し、業種側の安定性が評価できない場合は不採用。
+        best_stability = best_eval.get("stability_objective")
+        global_stability = global_eval.get("stability_objective")
+        if best_stability is not None and global_stability is not None:
+            adopt = best_stability > global_stability
+        elif dates is not None:
+            adopt = False
+        else:
+            adopt = best_eval["objective"] > global_eval["objective"]
+        if adopt and threshold != base_threshold:
             sector_thresholds[str(sector)] = float(threshold)
             sector_results[str(sector)] = {
                 "threshold": float(threshold),
@@ -1041,6 +1149,7 @@ def main():
         val_scores,
         val_df["future_return"].to_numpy(),
         val_df,
+        dates=val_df["date"],
     )
     sector_ml_buy_thresholds, sector_threshold_results = optimize_sector_thresholds(
         ml_buy_threshold,
@@ -1048,6 +1157,7 @@ def main():
         val_df["future_return"].to_numpy(),
         val_df,
         val_df["sector_label"],
+        dates=val_df["date"],
     )
 
     # テストデータ(完全に未使用のデータ)でしきい値の最終評価を行う
@@ -1076,6 +1186,16 @@ def main():
             f"{result['avg_return'] * 100:>10.2f}% {result['total_return'] * 100:>12.1f}%"
         )
     print(f"採用するML買いしきい値: {ml_buy_threshold:.2f}")
+    chosen = next((r for r in threshold_results if r["threshold"] == ml_buy_threshold), None)
+    if chosen and chosen.get("sub_periods"):
+        print("採用しきい値のサブ期間別成績(安定性チェック):")
+        for sp in chosen["sub_periods"]:
+            print(
+                f"  {sp['start']}〜{sp['end']}: trades={sp['trades']} "
+                f"avg_return={sp['avg_return'] * 100:.2f}%"
+            )
+        if chosen.get("stability_objective") is not None:
+            print(f"  stability_objective={chosen['stability_objective']:.4f}")
     if sector_ml_buy_thresholds:
         print("採用する業種別ML買いしきい値:")
         for sector, threshold in sorted(sector_ml_buy_thresholds.items()):
@@ -1099,7 +1219,9 @@ def main():
                 "target_return": TARGET_RETURN,
                 "grid": THRESHOLD_GRID,
                 "transaction_cost": TRANSACTION_COST,
-                "metric": "val_net_avg_return_with_win_hit_bonus_dynamic_market_filters",
+                "stability_splits": THRESHOLD_STABILITY_SPLITS,
+                "stability_std_penalty": THRESHOLD_STABILITY_STD_PENALTY,
+                "metric": "stable_val_net_avg_return_with_win_hit_bonus_dynamic_market_filters",
             },
             "training_config": {
                 "embargo_days": HORIZON_DAYS,
