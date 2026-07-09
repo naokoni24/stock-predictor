@@ -1,7 +1,7 @@
 """
 機械学習モデルの学習スクリプト。
 
-主力銘柄(TICKERS)について過去2年分の株価を取得し、
+主力銘柄(TICKERS)について過去3年分(TRAIN_HISTORY_PERIOD)の株価を取得し、
 テクニカル指標を特徴量として、
 「N日後に株価が一定%以上上昇したか」をラベルとした
 2値分類モデル(RandomForest)を学習する。
@@ -35,8 +35,13 @@ OPTUNA_N_TRIALS = 20
 HORIZON_DAYS = 5
 TARGET_RETURN = 0.02
 
+# 学習・walk-forward評価に使う株価履歴の期間。
+# 直近重み付け(下記)があるため、期間を伸ばしても直近の傾向が薄まらず、
+# 急落など出現頻度の低い相場のサンプルだけを増やせる。
+TRAIN_HISTORY_PERIOD = "3y"
+
 # 直近データを重視するサンプル重みの半減期(日)。小さいほど直近を重視する。
-# 2年分の学習データで365日なら、1年前のデータは重み0.5、2年前は0.25になる。
+# 半減期365日なら、1年前のデータは重み0.5、2年前は0.25、3年前は0.125になる。
 RECENCY_HALFLIFE_DAYS = 365
 
 # 1取引あたりの想定コスト(往復の売買手数料+スリッページ、リターン比)。
@@ -94,6 +99,22 @@ SECTOR_FEATURE_COLUMNS = [
     "sector_relative_strength_20d",
 ]
 
+# 市場ブレッドス(全銘柄共通)とクロスセクショナル順位(銘柄別)の特徴量。
+# 日経・TOPIXなどの指数とは別に、処理対象ユニバース内部の強さと
+# その日の全銘柄の中での相対的な位置を表す。add_breadth_features で算出する。
+BREADTH_FEATURE_COLUMNS = [
+    "breadth_above_sma25",         # 25日線を上回る銘柄の比率(0〜1)
+    "breadth_advance_ratio",       # 前日比プラスの銘柄比率(0〜1)
+    "breadth_above_sma25_chg_5d",  # 25日線超え比率の5日変化(-1〜1)
+    "cs_rank_return_5d",           # 5日リターンの当日ユニバース内百分位(0〜1)
+    "cs_rank_return_20d",          # 20日リターンの当日ユニバース内百分位(0〜1)
+    "cs_rank_volume_ratio",        # 出来高比率の当日ユニバース内百分位(0〜1)
+]
+
+# ブレッドス・順位を計算する最低銘柄数。これ未満の日は比率・順位が不安定なため
+# デフォルト値(中立)のままにする。
+MIN_BREADTH_UNIVERSE = 30
+
 BASE_FEATURE_COLUMNS = [
     "sma25_ratio",
     "sma75_ratio",
@@ -129,7 +150,12 @@ BASE_FEATURE_COLUMNS = [
     "di_diff_14",
 ]
 
-FEATURE_COLUMNS = BASE_FEATURE_COLUMNS + MARKET_FEATURE_COLUMNS + SECTOR_FEATURE_COLUMNS
+FEATURE_COLUMNS = (
+    BASE_FEATURE_COLUMNS
+    + MARKET_FEATURE_COLUMNS
+    + SECTOR_FEATURE_COLUMNS
+    + BREADTH_FEATURE_COLUMNS
+)
 
 import os
 
@@ -182,6 +208,99 @@ def market_default_value(column: str) -> float:
 def sector_default_value() -> float:
     """業種別データが欠けた時に使う中立値"""
     return 0.0
+
+
+def breadth_default_value(column: str) -> float:
+    """ブレッドス・クロスセクショナル特徴量が欠けた時に使う中立値。
+    比率・百分位は0.5(どちらでもない)、変化量は0.0を中立とする。"""
+    if column.endswith("_chg_5d"):
+        return 0.0
+    return 0.5
+
+
+def add_breadth_features(feature_frames: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
+    """処理対象ユニバース全体から市場ブレッドスとクロスセクショナル順位を算出する。
+
+    - breadth_*: その日のユニバースにおける25日線超え/値上がり銘柄の比率(全銘柄で同じ値)
+    - cs_rank_*: その日のユニバース内でのリターン・出来高比率の百分位順位(銘柄ごと)
+    いずれも当日までのデータしか使わないため、未来情報のリークはない。
+    銘柄数がMIN_BREADTH_UNIVERSE未満の日は算出せずデフォルト値(中立)のままにする。
+    学習(build_dataset)・walk-forward(backtest_ml)・日次推論(fetch_and_signal)で
+    同じ計算を共有する。ユニバースの銘柄数は場面で異なるが、比率・百分位のため
+    スケールには依存しない。
+    """
+    rows = []
+    for ticker, df in feature_frames.items():
+        if df.empty or "date" not in df.columns:
+            continue
+        rows.append(
+            df[["date", "sma25_ratio", "return_1d", "return_5d", "return_20d", "volume_ratio"]]
+            .assign(ticker=ticker)
+        )
+
+    if not rows:
+        return feature_frames
+
+    all_rows = pd.concat(rows, ignore_index=True)
+    universe_size = all_rows.groupby("date")["ticker"].transform("size")
+    valid = all_rows[universe_size >= MIN_BREADTH_UNIVERSE].copy()
+
+    result = {}
+    if valid.empty:
+        breadth = pd.DataFrame(columns=["date"])
+        ranks_by_ticker = {}
+    else:
+        # 指標が未計算(NaN)の行はTrue/Falseに数えず、比率の分母からも除外する
+        valid["above_sma25"] = np.where(
+            valid["sma25_ratio"].isna(), np.nan, (valid["sma25_ratio"] > 0).astype(float)
+        )
+        valid["advance"] = np.where(
+            valid["return_1d"].isna(), np.nan, (valid["return_1d"] > 0).astype(float)
+        )
+        breadth = (
+            valid.groupby("date", as_index=False)
+            .agg(
+                breadth_above_sma25=("above_sma25", "mean"),
+                breadth_advance_ratio=("advance", "mean"),
+            )
+            .sort_values("date")
+            .reset_index(drop=True)
+        )
+        breadth["breadth_above_sma25_chg_5d"] = (
+            breadth["breadth_above_sma25"] - breadth["breadth_above_sma25"].shift(5)
+        )
+
+        # クロスセクショナル百分位順位(その日の全銘柄中の位置、NaNはNaNのまま)
+        for source_col, rank_col in [
+            ("return_5d", "cs_rank_return_5d"),
+            ("return_20d", "cs_rank_return_20d"),
+            ("volume_ratio", "cs_rank_volume_ratio"),
+        ]:
+            valid[rank_col] = valid.groupby("date")[source_col].rank(pct=True)
+
+        rank_columns = ["cs_rank_return_5d", "cs_rank_return_20d", "cs_rank_volume_ratio"]
+        ranks_by_ticker = {
+            ticker: group[["date"] + rank_columns]
+            for ticker, group in valid.groupby("ticker")
+        }
+
+    for ticker, df in feature_frames.items():
+        enriched = df.drop(
+            columns=[c for c in BREADTH_FEATURE_COLUMNS if c in df.columns],
+            errors="ignore",
+        )
+        if not breadth.empty:
+            enriched = enriched.merge(breadth, on="date", how="left")
+        ticker_ranks = ranks_by_ticker.get(ticker)
+        if ticker_ranks is not None:
+            enriched = enriched.merge(ticker_ranks, on="date", how="left")
+        for column in BREADTH_FEATURE_COLUMNS:
+            if column not in enriched.columns:
+                enriched[column] = breadth_default_value(column)
+            enriched[column] = enriched[column].fillna(breadth_default_value(column))
+        result[ticker] = enriched
+
+    return result
 
 
 def select_features(X_train, y_train, candidate_columns, sample_weight=None) -> list[str]:
@@ -482,7 +601,7 @@ def build_market_features(symbols: str | list[str], prefix: str) -> pd.DataFrame
     hist = pd.DataFrame()
     used_symbol = None
     for symbol in symbols:
-        candidate = yf.Ticker(symbol).history(period="2y")
+        candidate = yf.Ticker(symbol).history(period=TRAIN_HISTORY_PERIOD)
         if not candidate.empty:
             hist = candidate
             used_symbol = symbol
@@ -614,6 +733,12 @@ def build_features(hist: pd.DataFrame, nikkei: pd.DataFrame | None = None) -> pd
         if column not in df.columns:
             df[column] = sector_default_value()
 
+    # ブレッドス特徴量はユニバース全体が必要なため単一銘柄では計算できない。
+    # add_breadth_features を通さない経路でも列が揃うよう中立値で埋めておく。
+    for column in BREADTH_FEATURE_COLUMNS:
+        if column not in df.columns:
+            df[column] = breadth_default_value(column)
+
     return df
 
 
@@ -687,7 +812,7 @@ def build_dataset() -> pd.DataFrame:
 
     feature_frames = {}
     for ticker in all_tickers:
-        hist = yf.Ticker(ticker).history(period="2y")
+        hist = yf.Ticker(ticker).history(period=TRAIN_HISTORY_PERIOD)
         if hist.empty:
             continue
         hist = hist.reset_index()
@@ -701,6 +826,7 @@ def build_dataset() -> pd.DataFrame:
         feature_frames[ticker] = df
 
     feature_frames = add_sector_relative_features(feature_frames, sectors)
+    feature_frames = add_breadth_features(feature_frames)
 
     for ticker, df in feature_frames.items():
 
@@ -980,6 +1106,8 @@ def main():
                 "recency_halflife_days": RECENCY_HALFLIFE_DAYS,
                 "transaction_cost": TRANSACTION_COST,
                 "ensemble_seeds": ENSEMBLE_SEEDS,
+                "train_history_period": TRAIN_HISTORY_PERIOD,
+                "breadth_feature_count": len(BREADTH_FEATURE_COLUMNS),
                 "selected_feature_count": len(feature_columns),
                 "total_feature_count": len(all_feature_columns),
             },

@@ -17,6 +17,7 @@ import yfinance as yf
 from fetch_and_signal import TICKERS, calc_rsi, calc_macd, calc_bollinger, get_jp_sector_map
 from sklearn.utils.class_weight import compute_sample_weight
 from train_model import (
+    add_breadth_features,
     add_sector_relative_features,
     adjusted_ml_buy_threshold,
     build_features,
@@ -32,6 +33,7 @@ from train_model import (
     HORIZON_DAYS,
     MODEL_PATH,
     RECENCY_HALFLIFE_DAYS,
+    TRAIN_HISTORY_PERIOD,
     TARGET_RETURN,
     THRESHOLD_GRID,
 )
@@ -84,7 +86,7 @@ def make_signal_param(row, rsi_buy_max: float = 60, rsi_sell_min: float = 75) ->
 def load_history() -> dict[str, pd.DataFrame]:
     histories = {}
     for ticker in TICKERS:
-        hist = yf.Ticker(ticker).history(period="2y")
+        hist = yf.Ticker(ticker).history(period=TRAIN_HISTORY_PERIOD)
         if hist.empty:
             continue
         hist = hist.reset_index()
@@ -507,6 +509,9 @@ def main():
         for ticker, hist in histories.items()
     }
     feature_frames = add_sector_relative_features(feature_frames, jp_sectors)
+    # 学習・日次推論と同じ計算でブレッドス特徴量を付与する
+    # (対象がTICKERS約33銘柄のためユニバースは本番より狭いが、比率・百分位なので比較可能)
+    feature_frames = add_breadth_features(feature_frames)
     walk_forward_dataset, walk_forward_sector_columns = build_backtest_dataset(
         histories,
         feature_frames,

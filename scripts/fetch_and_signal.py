@@ -514,13 +514,15 @@ def main():
 
     feature_frames = {}
     if model_bundle is not None:
-        from train_model import add_sector_relative_features, build_features
+        from train_model import add_breadth_features, add_sector_relative_features, build_features
 
         feature_frames = {
             ticker: build_features(hist, nikkei)
             for ticker, hist in histories.items()
         }
         feature_frames = add_sector_relative_features(feature_frames, jp_sectors)
+        # 当日処理対象の全銘柄から市場ブレッドス・銘柄順位を算出(学習時と同じ計算)
+        feature_frames = add_breadth_features(feature_frames)
 
     news_sentiment = get_news_sentiment(sb, list(histories.keys()))
 
