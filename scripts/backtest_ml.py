@@ -15,13 +15,12 @@ import pandas as pd
 import yfinance as yf
 
 from fetch_and_signal import TICKERS, calc_rsi, calc_macd, calc_bollinger, get_jp_sector_map
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier
 from sklearn.utils.class_weight import compute_sample_weight
-from lightgbm import LGBMClassifier
 from train_model import (
     add_sector_relative_features,
     adjusted_ml_buy_threshold,
     build_features,
+    build_voting_model,
     calibrate_scores,
     evaluate_threshold,
     get_nikkei_returns,
@@ -281,32 +280,11 @@ def build_backtest_dataset(
 
 
 def make_walk_forward_model():
-    """train_model.pyと同じ構成の一時モデルを作る"""
-    rf = RandomForestClassifier(
-        n_estimators=100,
-        max_depth=5,
-        min_samples_leaf=20,
-        random_state=42,
-        n_jobs=-1,
-        class_weight="balanced",
-    )
-    gb = GradientBoostingClassifier(
-        n_estimators=100,
-        max_depth=3,
-        min_samples_leaf=20,
-        random_state=42,
-    )
-    lgbm = LGBMClassifier(
-        n_estimators=200,
-        max_depth=5,
-        min_child_samples=20,
-        class_weight="balanced",
-        random_state=42,
-        verbose=-1,
-    )
-    return VotingClassifier(
-        estimators=[("rf", rf), ("gb", gb), ("lgbm", lgbm)],
-        voting="soft",
+    """train_model.pyと同じ構成(シード平均アンサンブル)の一時モデルを作る"""
+    return build_voting_model(
+        rf_params={"n_estimators": 100, "max_depth": 5, "min_samples_leaf": 20},
+        gb_params={"n_estimators": 100, "max_depth": 3, "min_samples_leaf": 20},
+        lgbm_params={"n_estimators": 200, "max_depth": 5, "min_child_samples": 20},
     )
 
 

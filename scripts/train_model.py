@@ -39,6 +39,16 @@ TARGET_RETURN = 0.02
 # 2年分の学習データで365日なら、1年前のデータは重み0.5、2年前は0.25になる。
 RECENCY_HALFLIFE_DAYS = 365
 
+# 1取引あたりの想定コスト(往復の売買手数料+スリッページ、リターン比)。
+# しきい値最適化とOptunaの目的関数はコスト控除後(net)のリターンで評価する。
+# 紙の上では僅かにプラスでも、実際は手数料負けする取引を選ばないようにするため。
+TRANSACTION_COST = 0.002
+
+# シード平均アンサンブル: 乱数シードを変えたRF/GB/LGBMのセットを複数学習し、
+# soft votingで予測確率を平均する。単一シードの当たり外れによる月次成績のブレを抑える。
+# Optunaの試行は速度優先で先頭シードのみ、最終モデルとwalk-forward評価は全シードを使う。
+ENSEMBLE_SEEDS = [42, 202, 777]
+
 # 買い判定のしきい値候補。再学習時にテストデータのバックテスト成績で最適値を選ぶ。
 THRESHOLD_GRID = [round(x, 3) for x in [0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80]]
 DEFAULT_ML_BUY_THRESHOLD = 0.55
@@ -124,6 +134,42 @@ FEATURE_COLUMNS = BASE_FEATURE_COLUMNS + MARKET_FEATURE_COLUMNS + SECTOR_FEATURE
 import os
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "model.pkl")
+
+
+def build_voting_model(
+    rf_params: dict,
+    gb_params: dict,
+    lgbm_params: dict,
+    seeds: list[int] | None = None,
+) -> VotingClassifier:
+    """RF/GB/LGBM×各シードのsoft voting分類器を作る(シード平均アンサンブル)。
+
+    soft votingは全推定器のpredict_probaを平均するため、シードごとの
+    アンサンブルを別々に学習して平均するのと等価で、保存物は素のsklearn
+    オブジェクトのまま(fetch_and_signal.py側の変更が不要)。
+    random_state / n_jobs / class_weight / verbose はここで付与するので
+    params側には含めないこと。
+    """
+    seeds = ENSEMBLE_SEEDS if seeds is None else seeds
+    estimators = []
+    for seed in seeds:
+        estimators.append((
+            f"rf_{seed}",
+            RandomForestClassifier(
+                **rf_params, random_state=seed, n_jobs=-1, class_weight="balanced"
+            ),
+        ))
+        estimators.append((
+            f"gb_{seed}",
+            GradientBoostingClassifier(**gb_params, random_state=seed),
+        ))
+        estimators.append((
+            f"lgbm_{seed}",
+            LGBMClassifier(
+                **lgbm_params, random_state=seed, class_weight="balanced", verbose=-1
+            ),
+        ))
+    return VotingClassifier(estimators=estimators, voting="soft")
 
 
 def market_default_value(column: str) -> float:
@@ -287,7 +333,12 @@ def evaluate_threshold(
     sectors: pd.Series | None = None,
     sector_thresholds: dict[str, float] | None = None,
 ) -> dict:
-    """指定しきい値で買った場合の5営業日後リターンを評価する"""
+    """指定しきい値で買った場合の5営業日後リターンを評価する。
+
+    win_rate / hit_rate / avg_return / total_return / objective は
+    1取引あたりTRANSACTION_COST(往復手数料+スリッページ)を控除したnetリターンで計算する。
+    参考値としてコスト控除前の avg_return_gross も返す。
+    """
     scores = np.asarray(scores)
     future_returns = np.asarray(future_returns)
     if feature_rows is not None:
@@ -308,7 +359,7 @@ def evaluate_threshold(
         mask = (scores >= thresholds) & ~blocked
     else:
         mask = scores >= threshold
-    selected_returns = future_returns[mask]
+    gross_returns = future_returns[mask]
     trades = int(mask.sum())
     if trades == 0:
         return {
@@ -317,14 +368,18 @@ def evaluate_threshold(
             "win_rate": 0.0,
             "hit_rate": 0.0,
             "avg_return": 0.0,
+            "avg_return_gross": 0.0,
             "total_return": 0.0,
+            "cost_per_trade": TRANSACTION_COST,
             "objective": float("-inf"),
         }
 
-    win_rate = float((selected_returns > 0).mean())
-    hit_rate = float((selected_returns >= TARGET_RETURN).mean())
-    avg_return = float(selected_returns.mean())
-    total_return = float(selected_returns.sum())
+    # 往復コスト控除後のリターンで評価する(手数料負けする取引を勝ち扱いしない)
+    net_returns = gross_returns - TRANSACTION_COST
+    win_rate = float((net_returns > 0).mean())
+    hit_rate = float((net_returns >= TARGET_RETURN).mean())
+    avg_return = float(net_returns.mean())
+    total_return = float(net_returns.sum())
 
     # 平均リターンを主軸に、勝率と+2%以上の的中率を少し加味する。
     # 極端に取引数が少ないしきい値は optimize_ml_buy_threshold 側で除外する。
@@ -335,7 +390,9 @@ def evaluate_threshold(
         "win_rate": win_rate,
         "hit_rate": hit_rate,
         "avg_return": avg_return,
+        "avg_return_gross": float(gross_returns.mean()),
         "total_return": total_return,
+        "cost_per_trade": TRANSACTION_COST,
         "objective": objective,
     }
 
@@ -746,37 +803,34 @@ def main():
     )
     cal_percentiles = np.linspace(0, 100, 21)
 
+    def trial_params(trial: optuna.Trial) -> tuple[dict, dict, dict]:
+        """Optuna試行からRF/GB/LGBMのパラメータ辞書を作る(build_voting_modelに渡す形)"""
+        rf_params = {
+            "n_estimators": trial.suggest_int("rf_n_estimators", 80, 200),
+            "max_depth": trial.suggest_int("rf_max_depth", 3, 7),
+            "min_samples_leaf": trial.suggest_int("rf_min_samples_leaf", 10, 50),
+        }
+        gb_params = {
+            "n_estimators": trial.suggest_int("gb_n_estimators", 50, 150),
+            "max_depth": trial.suggest_int("gb_max_depth", 2, 4),
+            "min_samples_leaf": trial.suggest_int("gb_min_samples_leaf", 10, 50),
+            "learning_rate": trial.suggest_float("gb_learning_rate", 0.02, 0.2, log=True),
+        }
+        lgbm_params = {
+            "n_estimators": trial.suggest_int("lgbm_n_estimators", 100, 300),
+            "max_depth": trial.suggest_int("lgbm_max_depth", 3, 7),
+            "min_child_samples": trial.suggest_int("lgbm_min_child_samples", 10, 50),
+            "learning_rate": trial.suggest_float("lgbm_learning_rate", 0.02, 0.2, log=True),
+            "num_leaves": trial.suggest_int("lgbm_num_leaves", 15, 48),
+        }
+        return rf_params, gb_params, lgbm_params
+
     def objective(trial: optuna.Trial) -> float:
-        """検証データの平均リターン(買いシグナル時)を最大化するハイパーパラメータを探索。
-        モデル非依存の前計算(val_blocked / val_adj_thresholds)を使い高速に評価する。"""
-        rf = RandomForestClassifier(
-            n_estimators=trial.suggest_int("rf_n_estimators", 80, 200),
-            max_depth=trial.suggest_int("rf_max_depth", 3, 7),
-            min_samples_leaf=trial.suggest_int("rf_min_samples_leaf", 10, 50),
-            random_state=42,
-            n_jobs=-1,
-            class_weight="balanced",
-        )
-        gb = GradientBoostingClassifier(
-            n_estimators=trial.suggest_int("gb_n_estimators", 50, 150),
-            max_depth=trial.suggest_int("gb_max_depth", 2, 4),
-            min_samples_leaf=trial.suggest_int("gb_min_samples_leaf", 10, 50),
-            learning_rate=trial.suggest_float("gb_learning_rate", 0.02, 0.2, log=True),
-            random_state=42,
-        )
-        lgbm = LGBMClassifier(
-            n_estimators=trial.suggest_int("lgbm_n_estimators", 100, 300),
-            max_depth=trial.suggest_int("lgbm_max_depth", 3, 7),
-            min_child_samples=trial.suggest_int("lgbm_min_child_samples", 10, 50),
-            learning_rate=trial.suggest_float("lgbm_learning_rate", 0.02, 0.2, log=True),
-            num_leaves=trial.suggest_int("lgbm_num_leaves", 15, 48),
-            class_weight="balanced",
-            random_state=42,
-            verbose=-1,
-        )
-        m = VotingClassifier(
-            estimators=[("rf", rf), ("gb", gb), ("lgbm", lgbm)], voting="soft"
-        )
+        """検証データのコスト控除後平均リターン(買いシグナル時)を最大化するパラメータを探索。
+        モデル非依存の前計算(val_blocked / val_adj_thresholds)を使い高速に評価する。
+        実行時間を抑えるため試行は先頭シードのみで学習する(最終モデルは全シードで平均)。"""
+        rf_params, gb_params, lgbm_params = trial_params(trial)
+        m = build_voting_model(rf_params, gb_params, lgbm_params, seeds=ENSEMBLE_SEEDS[:1])
         m.fit(X_train, y_train, sample_weight=sample_weight)
 
         # 学習データの予測確率分布で較正し、検証スコアを0〜1へ変換(calibrate_scoresと同等処理)
@@ -787,10 +841,11 @@ def main():
         selected = val_future[mask]
         if selected.size == 0:
             return float("-inf")
-        avg_return = float(selected.mean())
-        win_rate = float((selected > 0).mean())
-        hit_rate = float((selected >= TARGET_RETURN).mean())
-        # evaluate_threshold と同じ目的関数(平均リターン + 勝率/的中率の小ボーナス)
+        # evaluate_threshold と同じ目的関数(コスト控除後の平均リターン + 勝率/的中率の小ボーナス)
+        selected_net = selected - TRANSACTION_COST
+        avg_return = float(selected_net.mean())
+        win_rate = float((selected_net > 0).mean())
+        hit_rate = float((selected_net >= TARGET_RETURN).mean())
         return avg_return + win_rate * 0.005 + hit_rate * 0.005
 
     print(f"\nOptunaでハイパーパラメータを最適化中 ({OPTUNA_N_TRIALS}試行)...")
@@ -799,34 +854,27 @@ def main():
     best = study.best_params
     print(f"最良パラメータ: {best}")
 
-    rf = RandomForestClassifier(
-        n_estimators=best["rf_n_estimators"],
-        max_depth=best["rf_max_depth"],
-        min_samples_leaf=best["rf_min_samples_leaf"],
-        random_state=42,
-        n_jobs=-1,
-        class_weight="balanced",
-    )
-    gb = GradientBoostingClassifier(
-        n_estimators=best["gb_n_estimators"],
-        max_depth=best["gb_max_depth"],
-        min_samples_leaf=best["gb_min_samples_leaf"],
-        learning_rate=best["gb_learning_rate"],
-        random_state=42,
-    )
-    lgbm = LGBMClassifier(
-        n_estimators=best["lgbm_n_estimators"],
-        max_depth=best["lgbm_max_depth"],
-        min_child_samples=best["lgbm_min_child_samples"],
-        learning_rate=best["lgbm_learning_rate"],
-        num_leaves=best["lgbm_num_leaves"],
-        class_weight="balanced",
-        random_state=42,
-        verbose=-1,
-    )
-    model = VotingClassifier(
-        estimators=[("rf", rf), ("gb", gb), ("lgbm", lgbm)], voting="soft"
-    )
+    # 最終モデルは全シードで学習し、soft votingで予測確率を平均する(シード平均アンサンブル)
+    best_rf_params = {
+        "n_estimators": best["rf_n_estimators"],
+        "max_depth": best["rf_max_depth"],
+        "min_samples_leaf": best["rf_min_samples_leaf"],
+    }
+    best_gb_params = {
+        "n_estimators": best["gb_n_estimators"],
+        "max_depth": best["gb_max_depth"],
+        "min_samples_leaf": best["gb_min_samples_leaf"],
+        "learning_rate": best["gb_learning_rate"],
+    }
+    best_lgbm_params = {
+        "n_estimators": best["lgbm_n_estimators"],
+        "max_depth": best["lgbm_max_depth"],
+        "min_child_samples": best["lgbm_min_child_samples"],
+        "learning_rate": best["lgbm_learning_rate"],
+        "num_leaves": best["lgbm_num_leaves"],
+    }
+    model = build_voting_model(best_rf_params, best_gb_params, best_lgbm_params)
+    print(f"シード平均アンサンブル: seeds={ENSEMBLE_SEEDS} / 推定器{len(model.estimators)}本")
     # GradientBoostingはclass_weightを持たないため、sample_weightで不均衡を補正する
     model.fit(X_train, y_train, sample_weight=sample_weight)
 
@@ -834,10 +882,17 @@ def main():
     print(f"\nテストデータ正解率: {accuracy_score(y_test, pred):.3f}")
     print(classification_report(y_test, pred))
 
-    print("特徴量重要度 (RandomForest):")
-    rf_fitted = model.named_estimators_["rf"]
+    print("特徴量重要度 (RandomForest / シード平均):")
+    rf_importances = np.mean(
+        [
+            fitted.feature_importances_
+            for name, fitted in model.named_estimators_.items()
+            if name.startswith("rf_")
+        ],
+        axis=0,
+    )
     for col, importance in sorted(
-        zip(feature_columns, rf_fitted.feature_importances_), key=lambda x: -x[1]
+        zip(feature_columns, rf_importances), key=lambda x: -x[1]
     ):
         print(f"  {col}: {importance:.3f}")
 
@@ -881,11 +936,12 @@ def main():
         sector_ml_buy_thresholds,
     )
     print(
-        f"\nテストデータでの最終評価(共通しきい値{ml_buy_threshold:.2f}+業種別調整): "
+        f"\nテストデータでの最終評価(共通しきい値{ml_buy_threshold:.2f}+業種別調整、"
+        f"往復コスト{TRANSACTION_COST * 100:.1f}%控除後): "
         f"trades={test_eval['trades']} win_rate={test_eval['win_rate'] * 100:.1f}% "
         f"avg_return={test_eval['avg_return'] * 100:.2f}% total_return={test_eval['total_return'] * 100:.1f}%"
     )
-    print("\n買い判定しきい値のバックテスト:")
+    print(f"\n買い判定しきい値のバックテスト(往復コスト{TRANSACTION_COST * 100:.1f}%控除後):")
     print(f"{'threshold':>10} {'trades':>7} {'win_rate':>9} {'hit_rate':>9} {'avg_return':>11} {'total_return':>13}")
     for result in threshold_results:
         print(
@@ -916,11 +972,14 @@ def main():
                 "horizon_days": HORIZON_DAYS,
                 "target_return": TARGET_RETURN,
                 "grid": THRESHOLD_GRID,
-                "metric": "val_avg_return_with_win_hit_bonus_dynamic_market_filters",
+                "transaction_cost": TRANSACTION_COST,
+                "metric": "val_net_avg_return_with_win_hit_bonus_dynamic_market_filters",
             },
             "training_config": {
                 "embargo_days": HORIZON_DAYS,
                 "recency_halflife_days": RECENCY_HALFLIFE_DAYS,
+                "transaction_cost": TRANSACTION_COST,
+                "ensemble_seeds": ENSEMBLE_SEEDS,
                 "selected_feature_count": len(feature_columns),
                 "total_feature_count": len(all_feature_columns),
             },
