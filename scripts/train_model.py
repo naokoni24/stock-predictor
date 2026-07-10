@@ -1,7 +1,7 @@
 """
 機械学習モデルの学習スクリプト。
 
-主力銘柄(TICKERS)について過去3年分(TRAIN_HISTORY_PERIOD)の株価を取得し、
+主力銘柄(TICKERS)についてTRAIN_HISTORY_PERIOD分(現在2年)の株価を取得し、
 テクニカル指標を特徴量として、
 「N日後に株価が一定%以上上昇したか」をラベルとした
 2値分類モデル(RandomForest)を学習する。
@@ -30,10 +30,6 @@ optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 # Optunaの試行回数。月次再学習はGitHub Actions上(2コア)で動くため、実行時間を抑える値にする。
 OPTUNA_N_TRIALS = 20
-
-# Optunaの目的関数で、各サブ期間に最低限必要な取引数。
-# これ未満のサブ期間があるパラメータは評価が不安定として棄却(-inf)する。
-OPTUNA_MIN_SUB_TRADES = 5
 
 # N日後に株価がこの%以上上昇していたら「上昇」ラベル(1)とする
 HORIZON_DAYS = 5
@@ -582,51 +578,6 @@ def add_stability_metrics(
         )
 
 
-def build_period_masks(dates, splits: int = THRESHOLD_STABILITY_SPLITS) -> list[np.ndarray]:
-    """日付配列を営業日ベースでsplits等分し、各サブ期間の行マスク(bool配列)を返す。
-
-    期間が短すぎて分割できない場合は全期間1マスクにフォールバックする
-    (この場合、安定性評価は従来の全期間評価と一致する)。
-    """
-    date_values = np.asarray(pd.Series(dates).to_numpy())
-    unique_dates = np.array(sorted(pd.unique(date_values)))
-    if len(unique_dates) < splits * 2:
-        return [np.ones(len(date_values), dtype=bool)]
-    return [np.isin(date_values, chunk) for chunk in np.array_split(unique_dates, splits)]
-
-
-def stable_trial_objective(
-    val_scores,
-    val_adj_thresholds,
-    val_blocked,
-    val_future,
-    val_period_masks: list[np.ndarray],
-    min_sub_trades: int = OPTUNA_MIN_SUB_TRADES,
-) -> float:
-    """Optuna試行の目的関数本体(モデル評価後のスコアから算出する部分)。
-
-    買いシグナル行をサブ期間ごとに分け、各サブ期間のコスト控除後objective
-    (平均netリターン + 勝率/的中率の小ボーナス)の「平均 − ペナルティ×標準偏差」を返す。
-    しきい値選択(add_stability_metrics)と同じ思想で、単一の検証期間全体の成績が
-    良いだけのハイパーパラメータ(地合いへの過適合)を弾く。
-    取引数がmin_sub_trades未満のサブ期間があるパラメータは-infで棄却する。
-    """
-    mask = (np.asarray(val_scores) >= np.asarray(val_adj_thresholds)) & ~np.asarray(val_blocked)
-    val_future = np.asarray(val_future)
-    sub_objectives = []
-    for period_mask in val_period_masks:
-        selected = val_future[mask & period_mask]
-        if selected.size < min_sub_trades:
-            return float("-inf")
-        selected_net = selected - TRANSACTION_COST
-        avg_return = float(selected_net.mean())
-        win_rate = float((selected_net > 0).mean())
-        hit_rate = float((selected_net >= TARGET_RETURN).mean())
-        sub_objectives.append(avg_return + win_rate * 0.005 + hit_rate * 0.005)
-    objectives = np.array(sub_objectives)
-    return float(objectives.mean() - THRESHOLD_STABILITY_STD_PENALTY * objectives.std())
-
-
 def optimize_ml_buy_threshold(
     scores,
     future_returns,
@@ -1086,9 +1037,6 @@ def main():
         [adjusted_ml_buy_threshold(DEFAULT_ML_BUY_THRESHOLD, row) for _, row in val_df.iterrows()]
     )
     cal_percentiles = np.linspace(0, 100, 21)
-    # 検証期間をしきい値選択と同じサブ期間に分割(試行内で再計算しないよう事前構築)
-    val_period_masks = build_period_masks(val_df["date"])
-    print(f"Optuna目的関数: 検証を{len(val_period_masks)}サブ期間に分割した安定性評価を使用")
 
     def trial_params(trial: optuna.Trial) -> tuple[dict, dict, dict]:
         """Optuna試行からRF/GB/LGBMのパラメータ辞書を作る(build_voting_modelに渡す形)"""
@@ -1113,12 +1061,9 @@ def main():
         return rf_params, gb_params, lgbm_params
 
     def objective(trial: optuna.Trial) -> float:
-        """検証データのサブ期間安定性評価(コスト控除後)を最大化するパラメータを探索。
-        単一の検証期間全体の成績だけで選ぶと地合いへの過適合が起きるため、
-        しきい値選択と同じ「サブ期間objectiveの平均 − ばらつきペナルティ」で評価する。
-        モデル非依存の前計算(val_blocked / val_adj_thresholds / val_period_masks)を使い
-        高速に評価する。実行時間を抑えるため試行は先頭シードのみで学習する
-        (最終モデルは全シードで平均)。"""
+        """検証データのコスト控除後平均リターン(買いシグナル時)を最大化するパラメータを探索。
+        モデル非依存の前計算(val_blocked / val_adj_thresholds)を使い高速に評価する。
+        実行時間を抑えるため試行は先頭シードのみで学習する(最終モデルは全シードで平均)。"""
         rf_params, gb_params, lgbm_params = trial_params(trial)
         m = build_voting_model(rf_params, gb_params, lgbm_params, seeds=ENSEMBLE_SEEDS[:1])
         m.fit(X_train, y_train, sample_weight=sample_weight)
@@ -1127,9 +1072,16 @@ def main():
         cal_tmp = np.percentile(m.predict_proba(X_train)[:, 1], cal_percentiles)
         val_scores = np.interp(m.predict_proba(X_val)[:, 1], cal_tmp, cal_percentiles / 100)
 
-        return stable_trial_objective(
-            val_scores, val_adj_thresholds, val_blocked, val_future, val_period_masks
-        )
+        mask = (val_scores >= val_adj_thresholds) & ~val_blocked
+        selected = val_future[mask]
+        if selected.size == 0:
+            return float("-inf")
+        # evaluate_threshold と同じ目的関数(コスト控除後の平均リターン + 勝率/的中率の小ボーナス)
+        selected_net = selected - TRANSACTION_COST
+        avg_return = float(selected_net.mean())
+        win_rate = float((selected_net > 0).mean())
+        hit_rate = float((selected_net >= TARGET_RETURN).mean())
+        return avg_return + win_rate * 0.005 + hit_rate * 0.005
 
     print(f"\nOptunaでハイパーパラメータを最適化中 ({OPTUNA_N_TRIALS}試行)...")
     study = optuna.create_study(direction="maximize")
@@ -1284,7 +1236,6 @@ def main():
             },
             "optuna_best_params": best,
             "optuna_best_value": study.best_value,
-            "optuna_objective_metric": "stable_sub_period_net_avg_return_mean_minus_std",
         },
         MODEL_PATH,
     )
