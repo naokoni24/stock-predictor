@@ -1,13 +1,40 @@
 import { supabase } from "@/lib/supabase";
 import SearchableStockList from "./SearchableStockList";
 
-export default async function StocksPage() {
-  const { data: stocks, error } = await supabase
-    .from("stocks")
-    .select("ticker, name, sector")
-    .order("ticker");
+const STOCKS_PAGE_SIZE = 1000;
 
-  const tickers = (stocks ?? []).map((s) => s.ticker);
+type StockRow = { ticker: string; name: string; sector: string | null };
+
+async function fetchAllStocks(): Promise<{ stocks: StockRow[]; error: string | null }> {
+  const stocks: StockRow[] = [];
+  let from = 0;
+
+  while (true) {
+    const { data, error } = await supabase
+      .from("stocks")
+      .select("ticker, name, sector")
+      .order("ticker")
+      .range(from, from + STOCKS_PAGE_SIZE - 1);
+
+    if (error) {
+      return { stocks, error: error.message };
+    }
+
+    stocks.push(...(data ?? []));
+
+    if (!data || data.length < STOCKS_PAGE_SIZE) {
+      break;
+    }
+    from += STOCKS_PAGE_SIZE;
+  }
+
+  return { stocks, error: null };
+}
+
+export default async function StocksPage() {
+  const { stocks, error } = await fetchAllStocks();
+
+  const tickers = stocks.map((s) => s.ticker);
   const signalFetchLimit = Math.min(Math.max(tickers.length * 5, 300), 1000);
 
   const { data: signals } = tickers.length
@@ -26,7 +53,7 @@ export default async function StocksPage() {
     }
   }
 
-  const rows = (stocks ?? []).map((s) => ({
+  const rows = stocks.map((s) => ({
     ...s,
     signal: latestSignalByTicker.get(s.ticker) ?? null,
   }));
@@ -40,7 +67,7 @@ export default async function StocksPage() {
         </p>
       </div>
 
-      {error && <p className="text-bearish text-sm">データ取得エラー: {error.message}</p>}
+      {error && <p className="text-bearish text-sm">データ取得エラー: {error}</p>}
 
       {!error && rows.length === 0 && (
         <p className="text-muted-foreground text-sm">登録銘柄がありません。</p>
