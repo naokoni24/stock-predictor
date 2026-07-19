@@ -13,6 +13,8 @@ const SIGNAL_LABEL: Record<string, string> = {
   hold: "様子見",
 };
 
+const INITIAL_DISPLAY_LIMIT = 100;
+
 type StockRow = {
   ticker: string;
   name: string | null;
@@ -32,6 +34,8 @@ export default function SearchableStockList({ stocks }: { stocks: StockRow[] }) 
           (s.sector ?? "").toLowerCase().includes(q)
       )
     : stocks;
+  const displayed = q ? filtered : filtered.slice(0, INITIAL_DISPLAY_LIMIT);
+  const hiddenCount = filtered.length - displayed.length;
 
   return (
     <div className="flex flex-col gap-4">
@@ -51,7 +55,7 @@ export default function SearchableStockList({ stocks }: { stocks: StockRow[] }) 
       )}
 
       <div className="flex flex-col gap-2">
-        {filtered.map((s) => (
+        {displayed.map((s) => (
           <Link
             key={s.ticker}
             href={`/stock/${s.ticker}`}
@@ -82,6 +86,12 @@ export default function SearchableStockList({ stocks }: { stocks: StockRow[] }) 
           </Link>
         ))}
       </div>
+
+      {hiddenCount > 0 && (
+        <p className="text-muted-foreground text-xs text-center">
+          先頭{displayed.length}件を表示中(他{hiddenCount}件は検索で絞り込んでください)
+        </p>
+      )}
     </div>
   );
 }
