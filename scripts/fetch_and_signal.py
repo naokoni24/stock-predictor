@@ -36,6 +36,17 @@ MAX_DAILY_TICKERS = 150
 SCREENER_SIZE = 50
 PREVIOUS_SIGNAL_LIMIT = 50
 
+# prices/signalsのupsertをまとめて送る際の1リクエストあたりの最大行数
+UPSERT_CHUNK_SIZE = 500
+
+
+def upsert_in_chunks(table, rows, *, on_conflict=None):
+    """大量行を複数リクエストに分けてupsertし、銘柄ごとの個別リクエストを避ける"""
+    for i in range(0, len(rows), UPSERT_CHUNK_SIZE):
+        chunk = rows[i : i + UPSERT_CHUNK_SIZE]
+        query = table.upsert(chunk, on_conflict=on_conflict) if on_conflict else table.upsert(chunk)
+        query.execute()
+
 
 def load_ml_model():
     """学習済みモデルを読み込む。存在しない場合はNoneを返す(ML推論をスキップ)"""
@@ -473,6 +484,7 @@ def main():
     ).execute()
 
     histories = {}
+    all_price_rows = []
     for ticker in all_tickers:
         hist = yf.Ticker(ticker).history(period="6mo")
         if hist.empty:
@@ -509,8 +521,10 @@ def main():
             }
             for _, r in hist.tail(30).iterrows()
         ]
-        sb.table("prices").upsert(price_rows).execute()
+        all_price_rows.extend(price_rows)
         histories[ticker] = hist
+
+    upsert_in_chunks(sb.table("prices"), all_price_rows)
 
     feature_frames = {}
     if model_bundle is not None:
@@ -527,6 +541,7 @@ def main():
     news_sentiment = get_news_sentiment(sb, list(histories.keys()))
 
     signal_results = []
+    all_signal_rows = []
     for ticker, hist in histories.items():
         # 最新日のシグナルを保存
         latest = hist.iloc[-1]
@@ -551,7 +566,7 @@ def main():
                     print(f"ML buy blocked: 決算前後 {earnings_date} (D{days_to_earnings:+d}) {ticker}")
                     ml_signal = "hold"
 
-        sb.table("signals").upsert(
+        all_signal_rows.append(
             {
                 "ticker": ticker,
                 "date": market_date.isoformat(),
@@ -567,12 +582,13 @@ def main():
                 "score": score,
                 "ml_signal": ml_signal,
                 "ml_score": ml_score,
-            },
-            on_conflict="ticker,date",
-        ).execute()
+            }
+        )
 
         print(f"{ticker}: signal={signal} score={score} ml_signal={ml_signal} ml_score={ml_score}")
         signal_results.append({"ticker": ticker, "signal": signal, "score": score})
+
+    upsert_in_chunks(sb.table("signals"), all_signal_rows, on_conflict="ticker,date")
 
     update_fundamentals(sb, all_tickers, jp_sectors, signal_results)
 

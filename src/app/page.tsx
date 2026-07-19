@@ -34,39 +34,44 @@ type Row = {
   changePct?: number | null;
 };
 
-async function fetchTab(signalType: "buy_candidate" | "sell_candidate") {
+async function fetchWatchlists() {
   const { data: signals, error } = await supabase
     .from("signals")
     .select("ticker, date, close, rsi14, signal, score, ml_signal, ml_score, stocks(name, sector)")
     .order("date", { ascending: false })
     .limit(800);
 
-  // 銘柄ごとに最新日のシグナルのみを残す(タブの種類に関わらず最新日を優先)
+  // 銘柄ごとに最新日のシグナルのみを残す(買い/売り候補どちらのタブでも同じ最新日を使う)
   const latestByTicker = new Map<string, NonNullable<typeof signals>[number]>();
   for (const s of signals ?? []) {
     if (!latestByTicker.has(s.ticker)) {
       latestByTicker.set(s.ticker, s);
     }
   }
+  const latest = Array.from(latestByTicker.values());
 
-  const rows: Row[] = Array.from(latestByTicker.values())
-    .filter((s) => s.signal === signalType)
-    .sort((a, b) =>
-      signalType === "sell_candidate"
-        ? (a.score ?? 0) - (b.score ?? 0)
-        : (b.score ?? 0) - (a.score ?? 0)
-    )
-    .slice(0, 10)
-    .map((s) => {
-      const stock = Array.isArray(s.stocks) ? s.stocks[0] : s.stocks;
-      return {
-        ...s,
-        stockName: stock?.name,
-        sector: stock?.sector,
-      };
-    });
+  const buildRows = (signalType: "buy_candidate" | "sell_candidate"): Row[] =>
+    latest
+      .filter((s) => s.signal === signalType)
+      .sort((a, b) =>
+        signalType === "sell_candidate"
+          ? (a.score ?? 0) - (b.score ?? 0)
+          : (b.score ?? 0) - (a.score ?? 0)
+      )
+      .slice(0, 10)
+      .map((s) => {
+        const stock = Array.isArray(s.stocks) ? s.stocks[0] : s.stocks;
+        return {
+          ...s,
+          stockName: stock?.name,
+          sector: stock?.sector,
+        };
+      });
 
-  const tickers = rows.map((r) => r.ticker);
+  const buyRows = buildRows("buy_candidate");
+  const sellRows = buildRows("sell_candidate");
+
+  const tickers = [...new Set([...buyRows, ...sellRows].map((r) => r.ticker))];
   if (tickers.length) {
     const since = new Date();
     since.setDate(since.getDate() - 10);
@@ -83,7 +88,7 @@ async function fetchTab(signalType: "buy_candidate" | "sell_candidate") {
       if (arr.length < 2) arr.push(p.close);
       byTicker.set(p.ticker, arr);
     }
-    for (const r of rows) {
+    for (const r of [...buyRows, ...sellRows]) {
       const arr = byTicker.get(r.ticker);
       if (arr && arr.length === 2 && arr[1]) {
         r.changePct = ((arr[0] - arr[1]) / arr[1]) * 100;
@@ -91,7 +96,10 @@ async function fetchTab(signalType: "buy_candidate" | "sell_candidate") {
     }
   }
 
-  return { rows, error };
+  return {
+    buy: { rows: buyRows, error },
+    sell: { rows: sellRows, error },
+  };
 }
 
 function ChangeBadge({ value }: { value: number | null | undefined }) {
@@ -248,11 +256,7 @@ const SENTIMENT_COLOR: Record<string, string> = {
 };
 
 export default async function Home() {
-  const [buy, sell, news] = await Promise.all([
-    fetchTab("buy_candidate"),
-    fetchTab("sell_candidate"),
-    fetchNews(),
-  ]);
+  const [{ buy, sell }, news] = await Promise.all([fetchWatchlists(), fetchNews()]);
 
   const topPick = buy.rows[0];
 

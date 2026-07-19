@@ -1,36 +1,94 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# AI Stock Signal (stock-predictor)
 
-## Getting Started
+日本株(`.T`ティッカー)向けの株価シグナル予測・ニュース確認・保有株管理を行うWebアプリ。
+完全無料運用(Vercel Hobby / Supabase Free / GitHub Actions無料枠)を前提に設計している。
 
-First, run the development server:
+## 画面構成
+
+- `/`: 本日のおすすめ(買い候補/売り候補タブ)、AI注目銘柄、マーケットニュース。
+- `/holdings`: 保有株のCRUD、損益・リスク表示、推奨損切り価格、資産配分グラフ。認証必須。
+- `/stocks`: 登録銘柄一覧、検索。
+- `/stock/[ticker]`: 銘柄詳細(ローソク足チャート、テクニカル指標、AI分析、AIスコア履歴、ファンダメンタル指標)。
+- `/login`、`/forgot-password`、`/reset-password`: Supabase Authによる認証。
+
+## 技術構成
+
+- フロントエンド: Next.js (App Router) + TypeScript、shadcn/ui、Tailwind CSS、next-themes。
+- DB / Auth: Supabase Postgres + Auth + RLS。
+- バッチ / ML: Python(yfinance、pandas、scikit-learn、LightGBM、joblib、Optuna)。
+- ホスティング: Vercel Hobby。
+- 定期実行: GitHub Actions(`daily-signals.yml`、`monthly-retrain.yml`)。
+
+無料枠を維持するための設計方針は [docs/free-tier-architecture.md](docs/free-tier-architecture.md) を参照。
+
+## セットアップ(フロントエンド)
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+[http://localhost:3010](http://localhost:3010) で確認できる(`package.json` の `dev` スクリプトでポート3010を指定)。
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+`.env.local` に以下を設定する。
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```
+NEXT_PUBLIC_SUPABASE_URL=...
+NEXT_PUBLIC_SUPABASE_ANON_KEY=...
+```
 
-## Learn More
+## セットアップ(バッチ/ML・Python)
 
-To learn more about Next.js, take a look at the following resources:
+```bash
+python3 -m venv scripts/venv
+scripts/venv/bin/pip install -r scripts/requirements.txt
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+環境変数(バッチ実行時に必要):
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+```
+SUPABASE_URL=...
+SUPABASE_SERVICE_KEY=...
+```
 
-## Deploy on Vercel
+主なスクリプト:
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+- `scripts/fetch_and_signal.py`: 日次の株価取得・テクニカル指標計算・シグナル生成・ML推論。
+- `scripts/fetch_news.py`: Google News RSSからニュース取得・簡易センチメント分析。
+- `scripts/train_model.py`: MLモデルの月次再学習(RandomForest / GradientBoosting / LightGBMのVotingClassifier)。
+- `scripts/backtest_ml.py`: 月次walk-forward方式のバックテスト。
+- `scripts/apply_retention.py`: prices/signals/newsの保持期間ルールに基づく古いデータの削除。
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+### macOSでLightGBMがロードできない場合
+
+macOS用の`lightgbm`標準wheelはHomebrew版`libomp`(OpenMPランタイム)の存在を前提にしている。
+Homebrewが無い環境では`import lightgbm`が`Library not loaded: @rpath/libomp.dylib`で失敗するため、
+OpenMPを無効にしたソースビルドに切り替える。
+
+```bash
+scripts/venv/bin/pip install cmake
+scripts/venv/bin/pip uninstall -y lightgbm
+scripts/venv/bin/pip install lightgbm --no-binary lightgbm \
+  --config-settings=cmake.define.USE_OPENMP=OFF
+```
+
+シングルスレッド動作になるが、日次/月次バッチの規模では実用上問題ない。
+
+## GitHub Actions
+
+- **daily-signals**: 毎日実行。株価・テクニカル指標・シグナル・ニュースを更新し、データ保持期間ルールを適用する。
+- **monthly-retrain**: 月1回実行。MLモデルを再学習し、`scripts/model.pkl` に差分があればbotがcommitする。
+
+いずれも `workflow_dispatch` で手動実行できる。必要なSecrets: `SUPABASE_URL`、`SUPABASE_SERVICE_KEY`。
+
+## Supabaseスキーマ変更
+
+スキーマ変更は自動実行せず、`supabase/` 配下にSQLを追加してSQL Editorで手動実行する運用にしている。
+
+## 検証コマンド
+
+```bash
+python3 -m py_compile scripts/train_model.py scripts/fetch_and_signal.py scripts/backtest_ml.py scripts/fetch_news.py
+npx tsc --noEmit
+git diff --check
+```

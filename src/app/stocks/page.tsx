@@ -38,7 +38,7 @@ const SIGNAL_FETCH_LIMIT = 600;
 export default async function StocksPage() {
   const { stocks, error } = await fetchAllStocks();
 
-  const { data: signals } = await supabase
+  const { data: signals, error: signalsError } = await supabase
     .from("signals")
     .select("ticker, date, signal")
     .order("date", { ascending: false })
@@ -66,6 +66,11 @@ export default async function StocksPage() {
       </div>
 
       {error && <p className="text-bearish text-sm">データ取得エラー: {error}</p>}
+      {signalsError && (
+        <p className="text-bearish text-sm">
+          シグナル取得エラー: {signalsError.message}(銘柄一覧は表示されますが、シグナル表示が欠けている可能性があります)
+        </p>
+      )}
 
       {!error && rows.length === 0 && (
         <p className="text-muted-foreground text-sm">登録銘柄がありません。</p>
