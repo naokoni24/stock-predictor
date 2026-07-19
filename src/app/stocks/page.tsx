@@ -31,20 +31,18 @@ async function fetchAllStocks(): Promise<{ stocks: StockRow[]; error: string | n
   return { stocks, error: null };
 }
 
+// 日次バッチは1日あたり最大150銘柄(MAX_DAILY_TICKERS)を処理するため、
+// 直近数日分をカバーできる件数を確保する(銘柄一覧の全件数には依存させない)。
+const SIGNAL_FETCH_LIMIT = 600;
+
 export default async function StocksPage() {
   const { stocks, error } = await fetchAllStocks();
 
-  const tickers = stocks.map((s) => s.ticker);
-  const signalFetchLimit = Math.min(Math.max(tickers.length * 5, 300), 1000);
-
-  const { data: signals } = tickers.length
-    ? await supabase
-        .from("signals")
-        .select("ticker, date, signal")
-        .in("ticker", tickers)
-        .order("date", { ascending: false })
-        .limit(signalFetchLimit)
-    : { data: [] };
+  const { data: signals } = await supabase
+    .from("signals")
+    .select("ticker, date, signal")
+    .order("date", { ascending: false })
+    .limit(SIGNAL_FETCH_LIMIT);
 
   const latestSignalByTicker = new Map<string, string | null>();
   for (const s of signals ?? []) {
