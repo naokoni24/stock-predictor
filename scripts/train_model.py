@@ -20,7 +20,7 @@ import pandas as pd
 import yfinance as yf
 import optuna
 
-from fetch_and_signal import TICKERS, calc_rsi, calc_macd, calc_bollinger, calc_adx, get_screener_tickers, get_jpx_maps
+from fetch_and_signal import TICKERS, calc_rsi, calc_macd, calc_bollinger, calc_adx, get_screener_tickers, get_jp_sector_map
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier
 from sklearn.metrics import accuracy_score, classification_report
 from sklearn.utils.class_weight import compute_sample_weight
@@ -40,11 +40,6 @@ TARGET_RETURN = 0.02
 # 2年版(net+1.36%/取引)から明確に悪化(+0.46%、しきい値安定化後も+0.03%)したため
 # 2年へ戻した。直近重み付けだけでは古い地合いの混入を相殺できなかったと判断。
 TRAIN_HISTORY_PERIOD = "2y"
-
-# 学習に使う銘柄数の上限。期間を伸ばす(縦方向)のは2026-07に失敗済みのため、
-# 同じ2年間のまま銘柄数を増やして学習行数を増やす(横方向)方針に切り替える。
-# 主力銘柄+スクリーニング銘柄で足りない分はJPX上場銘柄一覧から補充する。
-TRAIN_UNIVERSE_SIZE = 400
 
 # 直近データを重視するサンプル重みの半減期(日)。小さいほど直近を重視する。
 # 半減期365日なら、1年前のデータは重み0.5、2年前は0.25、3年前は0.125になる。
@@ -914,8 +909,6 @@ def add_sector_relative_features(
 def build_dataset() -> pd.DataFrame:
     rows = []
 
-    jp_names, sectors = get_jpx_maps()
-
     # 主力銘柄 + スクリーニング銘柄(値上がり/値下がり上位)を学習データに含めて母数を増やす
     all_tickers = dict(TICKERS)
     screener_tickers = get_screener_tickers()
@@ -923,14 +916,8 @@ def build_dataset() -> pd.DataFrame:
     for t, n in screener_tickers.items():
         all_tickers.setdefault(t, n)
 
-    # 上限に満たない分はJPX上場銘柄一覧から補充し、学習銘柄数(=学習行数)を増やす
-    for t, n in jp_names.items():
-        if len(all_tickers) >= TRAIN_UNIVERSE_SIZE:
-            break
-        all_tickers.setdefault(t, n)
-    print(f"training universe: {len(all_tickers)} tickers (cap {TRAIN_UNIVERSE_SIZE})")
-
     nikkei = get_nikkei_returns()
+    sectors = get_jp_sector_map()
 
     feature_frames = {}
     for ticker in all_tickers:
