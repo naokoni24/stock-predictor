@@ -23,6 +23,7 @@ from train_model import (
     build_features,
     build_voting_model,
     calibrate_scores,
+    compute_barrier_outcome,
     evaluate_threshold,
     get_nikkei_returns,
     is_ml_buy_blocked,
@@ -34,7 +35,6 @@ from train_model import (
     MODEL_PATH,
     RECENCY_HALFLIFE_DAYS,
     TRAIN_HISTORY_PERIOD,
-    TARGET_RETURN,
     THRESHOLD_GRID,
 )
 
@@ -254,13 +254,13 @@ def build_backtest_dataset(
             continue
 
         source = df.copy()
-        source["future_return"] = source["Close"].shift(-HORIZON_DAYS) / source["Close"] - 1
-        source["label"] = (source["future_return"] >= TARGET_RETURN).astype(int)
+        source["label"], source["future_return"] = compute_barrier_outcome(source)
         source["rule_buy"] = source.apply(lambda row: make_signal_param(row) == "buy_candidate", axis=1)
         source = source.dropna(subset=FEATURE_COLUMNS + ["future_return", "label"])
         source = source.iloc[:-HORIZON_DAYS] if len(source) > HORIZON_DAYS else source.iloc[0:0]
         if source.empty:
             continue
+        source["label"] = source["label"].astype(int)
 
         source = source[["date"] + FEATURE_COLUMNS + ["future_return", "label", "rule_buy"]].copy()
         source["ticker"] = ticker

@@ -35,6 +35,10 @@ OPTUNA_N_TRIALS = 20
 HORIZON_DAYS = 5
 TARGET_RETURN = 0.02
 
+# 推奨損切り幅(現在値からの下落率)。フロント(ホーム/保有株画面)の推奨損切り表示と同じ値。
+# ラベル作成時、実運用ルール(利確なし・この幅で損切り・HORIZON_DAYS日で時間決済)に合わせる。
+STOP_LOSS_PCT = 0.08
+
 # 学習・walk-forward評価に使う株価履歴の期間。
 # 3年に伸ばす検証を2026-07に実施したが、テスト期間(2026-02〜06)の成績が
 # 2年版(net+1.36%/取引)から明確に悪化(+0.46%、しきい値安定化後も+0.03%)したため
@@ -906,6 +910,45 @@ def add_sector_relative_features(
     return result
 
 
+def compute_barrier_outcome(
+    df: pd.DataFrame,
+    horizon_days: int = HORIZON_DAYS,
+    target_return: float = TARGET_RETURN,
+    stop_loss_pct: float = STOP_LOSS_PCT,
+) -> tuple[pd.Series, pd.Series]:
+    """実際の運用ルール(利確なし・stop_loss_pct%損切り・horizon_days日時間決済)に
+    合わせてラベルと実現リターンを計算する。
+
+    現在値(Close)を基準に、horizon_days日以内にLowが損切り水準を割ったらその時点で
+    損切り(realized_return=-stop_loss_pct, label=0)とし、割らなければhorizon_days後の
+    close-to-closeリターンで判定する(利確は行わないため上側バリアは設けない)。
+    従来の「horizon_days後の終値だけで判定」するラベルだと、途中で損切り水準を割って
+    から戻った銘柄まで「勝ち」として学習してしまう不整合があったため、これを解消する。
+    """
+    close = df["Close"].to_numpy(dtype=float)
+    low = df["Low"].to_numpy(dtype=float)
+    n = len(df)
+
+    labels = np.full(n, np.nan)
+    realized = np.full(n, np.nan)
+
+    for i in range(n - horizon_days):
+        entry = close[i]
+        if not np.isfinite(entry) or entry == 0:
+            continue
+        stop_price = entry * (1 - stop_loss_pct)
+        stopped_out = any(low[i + j] <= stop_price for j in range(1, horizon_days + 1))
+        if stopped_out:
+            realized[i] = -stop_loss_pct
+            labels[i] = 0
+        else:
+            time_return = close[i + horizon_days] / entry - 1
+            realized[i] = time_return
+            labels[i] = 1 if time_return >= target_return else 0
+
+    return pd.Series(labels, index=df.index), pd.Series(realized, index=df.index)
+
+
 def build_dataset() -> pd.DataFrame:
     rows = []
 
@@ -939,14 +982,13 @@ def build_dataset() -> pd.DataFrame:
 
     for ticker, df in feature_frames.items():
 
-        # N日後の終値の変化率からラベルを作成
-        future_close = df["Close"].shift(-HORIZON_DAYS)
-        df["future_return"] = future_close / df["Close"] - 1
-        df["label"] = (df["future_return"] >= TARGET_RETURN).astype(int)
+        # 実運用ルール(損切り・時間決済)に合わせたバリア方式でラベル・実現リターンを作成
+        df["label"], df["future_return"] = compute_barrier_outcome(df)
 
         # 特徴量・ラベルが揃っている行のみ使用(末尾HORIZON_DAYS行は未来データがないため除外)
         df = df.dropna(subset=FEATURE_COLUMNS + ["future_return", "label"])
         df = df.iloc[:-HORIZON_DAYS] if len(df) > HORIZON_DAYS else df.iloc[0:0]
+        df["label"] = df["label"].astype(int)
 
         df = df[["date"] + FEATURE_COLUMNS + ["future_return", "label"]].copy()
         df["sector"] = sectors.get(ticker, "不明")
