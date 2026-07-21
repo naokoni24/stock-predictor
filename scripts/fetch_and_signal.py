@@ -138,6 +138,23 @@ def predict_ml(model_bundle, hist, nikkei, sector=None, feature_df=None, news_se
         print(f"ML buy blocked: reasons={','.join(block_reasons)} score={score:.4f} threshold={threshold:.2f}")
     return signal, round(score, 4)
 
+
+def limit_ml_buy_candidates(signal_rows: list[dict], max_candidates: int) -> int:
+    """ML買い候補を超過リターンスコア順で上位件数に絞り、除外数を返す。"""
+    if max_candidates <= 0:
+        return 0
+    candidates = sorted(
+        (
+            (index, row)
+            for index, row in enumerate(signal_rows)
+            if row["ml_signal"] == "buy_candidate" and row["ml_score"] is not None
+        ),
+        key=lambda item: (-item[1]["ml_score"], item[1]["ticker"]),
+    )
+    for index, _ in candidates[max_candidates:]:
+        signal_rows[index]["ml_signal"] = "hold"
+    return max(0, len(candidates) - max_candidates)
+
 # 対象銘柄(ティッカー: 名称)。必要に応じて追加・holdingsテーブルと連動させる
 TICKERS = {
     "7203.T": "トヨタ自動車",
@@ -587,6 +604,20 @@ def main():
 
         print(f"{ticker}: signal={signal} score={score} ml_signal={ml_signal} ml_score={ml_score}")
         signal_results.append({"ticker": ticker, "signal": signal, "score": score})
+
+    # 超過リターンモデルは「市場・業種を上回る候補を相対的に選ぶ」目的のため、
+    # 学習時に保存した上限まで、その日のML買い候補をスコア順で絞り込む。
+    # 旧モデルには設定がないため、再学習・昇格するまでは従来の件数制限なしで動作する。
+    max_ml_candidates = int(
+        (model_bundle or {}).get("training_config", {}).get("max_daily_ml_buy_candidates", 0) or 0
+    )
+    if max_ml_candidates > 0:
+        removed = limit_ml_buy_candidates(all_signal_rows, max_ml_candidates)
+        if removed:
+            print(
+                f"ML買い候補を超過リターンスコア上位{max_ml_candidates}件へ絞り込み "
+                f"({removed}件を除外)"
+            )
 
     upsert_in_chunks(sb.table("signals"), all_signal_rows, on_conflict="ticker,date")
 

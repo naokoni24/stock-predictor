@@ -37,6 +37,13 @@ HORIZON_DAYS = 5
 LABEL_LOOKAHEAD_DAYS = HORIZON_DAYS + 1
 TARGET_RETURN = 0.02
 
+# 市場・同業種を上回る候補を選ぶための超過リターン目標。
+# 同日・同業種の他銘柄の平均実現リターンをベンチマークにし、0.5%以上上回った場合を正例とする。
+# 業種内の比較対象が少ない日は、同日の学習ユニバース全体（自銘柄を除く）を代替ベンチマークに使う。
+EXCESS_RETURN_TARGET = 0.005
+MIN_SECTOR_BENCHMARK_MEMBERS = 3
+MAX_DAILY_ML_BUY_CANDIDATES = 10
+
 # 推奨損切り幅(現在値からの下落率)。フロント(ホーム/保有株画面)の推奨損切り表示と同じ値。
 # ラベル作成時、実運用ルール(利確なし・この幅で損切り・HORIZON_DAYS日で時間決済)に合わせる。
 STOP_LOSS_PCT = 0.08
@@ -106,6 +113,7 @@ MARKET_METRICS = [
     "rsi14",
     "volatility_20d",
 ]
+TOPIX_OPEN_COLUMN = "topix_open"
 
 MARKET_FEATURE_COLUMNS = [
     f"{prefix}_{metric}"
@@ -517,7 +525,7 @@ def evaluate_threshold(
     # 往復コスト控除後のリターンで評価する(手数料負けする取引を勝ち扱いしない)
     net_returns = gross_returns - TRANSACTION_COST
     win_rate = float((net_returns > 0).mean())
-    hit_rate = float((net_returns >= TARGET_RETURN).mean())
+    hit_rate = float((net_returns >= EXCESS_RETURN_TARGET).mean())
     avg_return = float(net_returns.mean())
     total_return = float(net_returns.sum())
 
@@ -558,7 +566,7 @@ def evaluate_model_bundle(
     scores = calibrate_scores(raw_scores, bundle.get("score_calibration"))
     result = evaluate_threshold(
         scores,
-        evaluation_df["future_return"].to_numpy(),
+        evaluation_df["future_excess_return"].to_numpy(),
         float(bundle.get("ml_buy_threshold", DEFAULT_ML_BUY_THRESHOLD)),
         evaluation_df,
         evaluation_df["sector_label"],
@@ -800,7 +808,13 @@ def build_market_features(symbols: str | list[str], prefix: str) -> pd.DataFrame
     hist[f"{prefix}_rsi14"] = calc_rsi(hist["Close"], 14)
     hist[f"{prefix}_volatility_20d"] = hist[f"{prefix}_return_1d"].rolling(20).std()
 
-    return hist[["date"] + [f"{prefix}_{m}" for m in MARKET_METRICS]]
+    columns = ["date"] + [f"{prefix}_{m}" for m in MARKET_METRICS]
+    # TOPIX指数が取得できない場合は1306.Tを使うため、どちらも同じ列名で扱う。
+    # 始値は超過リターンのラベル作成専用であり、モデル特徴量には含めない。
+    if prefix == "topix":
+        hist[TOPIX_OPEN_COLUMN] = hist["Open"]
+        columns.append(TOPIX_OPEN_COLUMN)
+    return hist[columns]
 
 
 def get_nikkei_returns() -> pd.DataFrame:
@@ -821,7 +835,8 @@ def get_nikkei_returns() -> pd.DataFrame:
     for column in MARKET_FEATURE_COLUMNS:
         market[column] = market[column].fillna(market_default_value(column))
 
-    return market[["date"] + MARKET_FEATURE_COLUMNS]
+    extra_columns = [TOPIX_OPEN_COLUMN] if TOPIX_OPEN_COLUMN in market.columns else []
+    return market[["date"] + MARKET_FEATURE_COLUMNS + extra_columns]
 
 
 def build_features(hist: pd.DataFrame, nikkei: pd.DataFrame | None = None) -> pd.DataFrame:
@@ -897,8 +912,17 @@ def build_features(hist: pd.DataFrame, nikkei: pd.DataFrame | None = None) -> pd
         for column in MARKET_FEATURE_COLUMNS:
             df[column] = df[column].fillna(market_default_value(column))
         df["relative_strength_5d"] = df["return_5d"] - df["nikkei_return_5d"]
+        if TOPIX_OPEN_COLUMN in df.columns:
+            df["topix_benchmark_return"] = (
+                df[TOPIX_OPEN_COLUMN].shift(-LABEL_LOOKAHEAD_DAYS)
+                / df[TOPIX_OPEN_COLUMN].shift(-1)
+                - 1
+            )
+        else:
+            df["topix_benchmark_return"] = np.nan
     else:
         df["relative_strength_5d"] = df["return_5d"]
+        df["topix_benchmark_return"] = np.nan
         for column in MARKET_FEATURE_COLUMNS:
             df[column] = market_default_value(column)
 
@@ -1017,6 +1041,71 @@ def compute_barrier_outcome(
     return pd.Series(labels, index=df.index), pd.Series(realized, index=df.index)
 
 
+def add_excess_return_targets(
+    feature_frames: dict[str, pd.DataFrame],
+    sectors: dict[str, str],
+) -> dict[str, pd.DataFrame]:
+    """約定ベースの実現リターンから、業種・市場に対する超過リターンのラベルを作る。
+
+    ベンチマークは同日・同業種の他銘柄の平均を優先し、十分な銘柄数がない場合は
+    TOPIX（取得不可時は学習ユニバース全体の他銘柄平均）へフォールバックする。平均は自銘柄を除外するため、
+    正解ラベルへ自銘柄の値動きが混ざる自己参照を避けられる。
+    """
+    prepared: dict[str, pd.DataFrame] = {}
+    rows = []
+    for ticker, frame in feature_frames.items():
+        source = frame.copy()
+        source["_ticker"] = ticker
+        source["_sector"] = sectors.get(ticker, "不明")
+        if "topix_benchmark_return" not in source.columns:
+            source["topix_benchmark_return"] = np.nan
+        source["future_return"] = compute_barrier_outcome(source)[1]
+        prepared[ticker] = source
+        rows.append(source[["date", "_ticker", "_sector", "future_return", "topix_benchmark_return"]])
+
+    if not rows:
+        return prepared
+
+    outcomes = pd.concat(rows, ignore_index=True).dropna(subset=["future_return"])
+    market = outcomes.groupby("date")["future_return"].agg(["sum", "count"])
+    market.columns = ["market_sum", "market_count"]
+    sector = outcomes.groupby(["date", "_sector"])["future_return"].agg(["sum", "count"])
+    sector.columns = ["sector_sum", "sector_count"]
+    benchmarks = outcomes.join(market, on="date").join(sector, on=["date", "_sector"])
+    benchmarks["market_benchmark_return"] = (
+        (benchmarks["market_sum"] - benchmarks["future_return"])
+        / (benchmarks["market_count"] - 1)
+    )
+    benchmarks["sector_benchmark_return"] = (
+        (benchmarks["sector_sum"] - benchmarks["future_return"])
+        / (benchmarks["sector_count"] - 1)
+    )
+    benchmarks["benchmark_return"] = np.where(
+        benchmarks["sector_count"] >= MIN_SECTOR_BENCHMARK_MEMBERS,
+        benchmarks["sector_benchmark_return"],
+        benchmarks["topix_benchmark_return"].fillna(benchmarks["market_benchmark_return"]),
+    )
+    benchmarks["future_excess_return"] = (
+        benchmarks["future_return"] - benchmarks["benchmark_return"]
+    )
+    benchmarks["label"] = np.where(
+        benchmarks["future_excess_return"].notna(),
+        (benchmarks["future_excess_return"] >= EXCESS_RETURN_TARGET).astype(float),
+        np.nan,
+    )
+
+    target_columns = [
+        "date", "_ticker", "future_return", "benchmark_return", "future_excess_return", "label"
+    ]
+    result = {}
+    for ticker, source in prepared.items():
+        enriched = source.merge(
+            benchmarks[target_columns], on=["date", "_ticker", "future_return"], how="left"
+        )
+        result[ticker] = enriched.drop(columns=["_ticker", "_sector"])
+    return result
+
+
 def build_dataset() -> pd.DataFrame:
     rows = []
 
@@ -1048,16 +1137,14 @@ def build_dataset() -> pd.DataFrame:
     feature_frames = add_sector_relative_features(feature_frames, sectors)
     feature_frames = add_breadth_features(feature_frames)
 
-    for ticker, df in feature_frames.items():
-
-        # 実運用ルール(損切り・時間決済)に合わせたバリア方式でラベル・実現リターンを作成
-        df["label"], df["future_return"] = compute_barrier_outcome(df)
+    labeled_frames = add_excess_return_targets(feature_frames, sectors)
+    for ticker, df in labeled_frames.items():
 
         # 特徴量・ラベルが揃っている行のみ使用(末尾は翌日約定+時間決済の未来データがないため除外)
-        df = df.dropna(subset=FEATURE_COLUMNS + ["future_return", "label"])
+        df = df.dropna(subset=FEATURE_COLUMNS + ["future_return", "future_excess_return", "label"])
         df["label"] = df["label"].astype(int)
 
-        df = df[["date"] + FEATURE_COLUMNS + ["future_return", "label"]].copy()
+        df = df[["date"] + FEATURE_COLUMNS + ["future_return", "benchmark_return", "future_excess_return", "label"]].copy()
         df["sector"] = sectors.get(ticker, "不明")
         rows.append(df)
         print(f"{ticker}: {len(df)} rows")
@@ -1146,7 +1233,7 @@ def main():
     # 特徴量だけで決まりモデルに依存しないため、ここで一度だけ計算して試行内の再計算を避ける。
     # (以前は試行ごとに行単位のpandas処理を繰り返し、再学習が極端に遅くなっていた)
     # フィルターは元の全特徴量を参照するため、選択後のX_valではなく全列のval_dfを使う。
-    val_future = val_df["future_return"].to_numpy()
+    val_future = val_df["future_excess_return"].to_numpy()
     val_blocked = val_df.apply(is_ml_buy_blocked, axis=1).to_numpy(dtype=bool)
     val_adj_thresholds = np.array(
         [adjusted_ml_buy_threshold(DEFAULT_ML_BUY_THRESHOLD, row) for _, row in val_df.iterrows()]
@@ -1195,7 +1282,7 @@ def main():
         selected_net = selected - TRANSACTION_COST
         avg_return = float(selected_net.mean())
         win_rate = float((selected_net > 0).mean())
-        hit_rate = float((selected_net >= TARGET_RETURN).mean())
+        hit_rate = float((selected_net >= EXCESS_RETURN_TARGET).mean())
         return avg_return + win_rate * 0.005 + hit_rate * 0.005
 
     print(f"\nOptunaでハイパーパラメータを最適化中 ({OPTUNA_N_TRIALS}試行)...")
@@ -1263,14 +1350,14 @@ def main():
     val_scores = calibrate_scores(val_raw_proba, calibration_values)
     ml_buy_threshold, threshold_results = optimize_ml_buy_threshold(
         val_scores,
-        val_df["future_return"].to_numpy(),
+        val_df["future_excess_return"].to_numpy(),
         val_df,
         dates=val_df["date"],
     )
     sector_ml_buy_thresholds, sector_threshold_results = optimize_sector_thresholds(
         ml_buy_threshold,
         val_scores,
-        val_df["future_return"].to_numpy(),
+        val_df["future_excess_return"].to_numpy(),
         val_df,
         val_df["sector_label"],
         dates=val_df["date"],
@@ -1281,7 +1368,7 @@ def main():
     test_scores = calibrate_scores(test_raw_proba, calibration_values)
     test_eval = evaluate_threshold(
         test_scores,
-        test_df["future_return"].to_numpy(),
+        test_df["future_excess_return"].to_numpy(),
         ml_buy_threshold,
         test_df,
         test_df["sector_label"],
@@ -1306,7 +1393,7 @@ def main():
     promote, promotion_reason = should_promote_candidate(test_eval, previous_eval)
     print(f"モデル昇格判定: {'昇格' if promote else '見送り'} — {promotion_reason}")
     print(
-        f"\nテストデータでの最終評価(共通しきい値{ml_buy_threshold:.2f}+業種別調整、"
+        f"\nテストデータでの最終評価(市場・業種に対する超過リターン、共通しきい値{ml_buy_threshold:.2f}+業種別調整、"
         f"往復コスト{TRANSACTION_COST * 100:.1f}%控除後): "
         f"trades={test_eval['trades']} win_rate={test_eval['win_rate'] * 100:.1f}% "
         f"avg_return={test_eval['avg_return'] * 100:.2f}% total_return={test_eval['total_return'] * 100:.1f}%"
@@ -1351,6 +1438,7 @@ def main():
                 "horizon_days": HORIZON_DAYS,
                 "label_lookahead_days": LABEL_LOOKAHEAD_DAYS,
                 "target_return": TARGET_RETURN,
+                "excess_return_target": EXCESS_RETURN_TARGET,
                 "grid": THRESHOLD_GRID,
                 "transaction_cost": TRANSACTION_COST,
                 "stability_splits": THRESHOLD_STABILITY_SPLITS,
@@ -1366,6 +1454,7 @@ def main():
                 "breadth_feature_count": len(BREADTH_FEATURE_COLUMNS),
                 "selected_feature_count": len(feature_columns),
                 "total_feature_count": len(all_feature_columns),
+                "max_daily_ml_buy_candidates": MAX_DAILY_ML_BUY_CANDIDATES,
             },
             "optuna_best_params": best,
             "optuna_best_value": study.best_value,

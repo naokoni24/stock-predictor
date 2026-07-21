@@ -18,12 +18,12 @@ from fetch_and_signal import TICKERS, calc_rsi, calc_macd, calc_bollinger, get_j
 from sklearn.utils.class_weight import compute_sample_weight
 from train_model import (
     add_breadth_features,
+    add_excess_return_targets,
     add_sector_relative_features,
     adjusted_ml_buy_threshold,
     build_features,
     build_voting_model,
     calibrate_scores,
-    compute_barrier_outcome,
     evaluate_threshold,
     get_nikkei_returns,
     is_ml_buy_blocked,
@@ -253,19 +253,19 @@ def build_backtest_dataset(
 ) -> tuple[pd.DataFrame, list[str]]:
     """取得済み履歴からwalk-forward評価用の学習テーブルを作る"""
     rows = []
-    for ticker, df in feature_frames.items():
+    labeled_frames = add_excess_return_targets(feature_frames, sectors)
+    for ticker, df in labeled_frames.items():
         if ticker not in histories or df.empty:
             continue
 
         source = df.copy()
-        source["label"], source["future_return"] = compute_barrier_outcome(source)
         source["rule_buy"] = source.apply(lambda row: make_signal_param(row) == "buy_candidate", axis=1)
-        source = source.dropna(subset=FEATURE_COLUMNS + ["future_return", "label"])
+        source = source.dropna(subset=FEATURE_COLUMNS + ["future_return", "future_excess_return", "label"])
         if source.empty:
             continue
         source["label"] = source["label"].astype(int)
 
-        source = source[["date"] + FEATURE_COLUMNS + ["future_return", "label", "rule_buy"]].copy()
+        source = source[["date"] + FEATURE_COLUMNS + ["future_return", "benchmark_return", "future_excess_return", "label", "rule_buy"]].copy()
         source["ticker"] = ticker
         source["sector"] = sectors.get(ticker, "不明")
         rows.append(source)
@@ -378,14 +378,14 @@ def run_walk_forward_evaluation(dataset: pd.DataFrame, sector_columns: list[str]
         val_scores = calibrate_scores(val_raw_proba, calibration_values)
         threshold, _ = optimize_ml_buy_threshold(
             val_scores,
-            val_df["future_return"].to_numpy(),
+            val_df["future_excess_return"].to_numpy(),
             val_df[feature_columns],
             dates=val_df["date"],
         )
         sector_thresholds, _ = optimize_sector_thresholds(
             threshold,
             val_scores,
-            val_df["future_return"].to_numpy(),
+            val_df["future_excess_return"].to_numpy(),
             val_df[feature_columns],
             val_df["sector_label"],
             dates=val_df["date"],
@@ -395,7 +395,7 @@ def run_walk_forward_evaluation(dataset: pd.DataFrame, sector_columns: list[str]
         test_scores = calibrate_scores(test_raw_proba, calibration_values)
         test_eval = evaluate_threshold(
             test_scores,
-            test_df["future_return"].to_numpy(),
+            test_df["future_excess_return"].to_numpy(),
             threshold,
             test_df[feature_columns],
             test_df["sector_label"],
