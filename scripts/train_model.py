@@ -31,8 +31,10 @@ optuna.logging.set_verbosity(optuna.logging.WARNING)
 # Optunaの試行回数。月次再学習はGitHub Actions上(2コア)で動くため、実行時間を抑える値にする。
 OPTUNA_N_TRIALS = 20
 
-# N日後に株価がこの%以上上昇していたら「上昇」ラベル(1)とする
+# シグナル日の翌営業日始値で約定し、N営業日保有後の始値で時間決済する。
+# ラベルは約定日までを見るため、情報リークを防ぐエンバーゴは N+1 営業日必要になる。
 HORIZON_DAYS = 5
+LABEL_LOOKAHEAD_DAYS = HORIZON_DAYS + 1
 TARGET_RETURN = 0.02
 
 # 推奨損切り幅(現在値からの下落率)。フロント(ホーム/保有株画面)の推奨損切り表示と同じ値。
@@ -74,6 +76,12 @@ MIN_ADJUSTED_ML_BUY_THRESHOLD = 0.50
 MAX_ADJUSTED_ML_BUY_THRESHOLD = 0.80
 MIN_SECTOR_THRESHOLD_ROWS = 120
 MIN_SECTOR_THRESHOLD_TRADES = 10
+
+# 月次再学習の自動昇格条件。候補モデルは、直近の未使用テスト期間で既存モデルより
+# 目的関数をこの値以上改善し、勝率を大きく落とさず、十分な取引数がある場合だけ本番化する。
+PROMOTION_MIN_TRADES = 30
+PROMOTION_MIN_OBJECTIVE_IMPROVEMENT = 0.001  # 1取引あたり0.10%相当
+PROMOTION_MAX_WIN_RATE_DECLINE = 0.02
 
 # 特徴量選択: 正規化gain重要度がこの割合未満の特徴量を除外する(過学習・ノイズ削減)。
 # 環境変数 SELECT_FEATURES=0 で無効化できる(A/B比較用)。
@@ -529,6 +537,58 @@ def evaluate_threshold(
     }
 
 
+def evaluate_model_bundle(
+    bundle: dict,
+    evaluation_df: pd.DataFrame,
+) -> tuple[dict | None, str | None]:
+    """保存済みモデルを候補と同じ未使用期間・約定ベースのリターンで評価する。
+
+    過去のモデルに必要な特徴量がなければ、無理に比較して昇格させない。
+    """
+    features = bundle.get("features", [])
+    missing = [column for column in features if column not in evaluation_df.columns]
+    if not features or missing:
+        return None, f"既存モデルの特徴量が評価データにない ({', '.join(missing[:3])})"
+
+    try:
+        raw_scores = bundle["model"].predict_proba(evaluation_df[features])[:, 1]
+    except (KeyError, ValueError) as exc:
+        return None, f"既存モデルの推論に失敗 ({exc})"
+
+    scores = calibrate_scores(raw_scores, bundle.get("score_calibration"))
+    result = evaluate_threshold(
+        scores,
+        evaluation_df["future_return"].to_numpy(),
+        float(bundle.get("ml_buy_threshold", DEFAULT_ML_BUY_THRESHOLD)),
+        evaluation_df,
+        evaluation_df["sector_label"],
+        bundle.get("sector_ml_buy_thresholds", {}),
+    )
+    return result, None
+
+
+def should_promote_candidate(candidate: dict, baseline: dict | None) -> tuple[bool, str]:
+    """再学習候補を本番モデルへ昇格させるかを決める。"""
+    if baseline is None:
+        # 初回導入時だけは比較対象がないため候補を保存し、次回から厳格比較する。
+        return True, "比較可能な既存モデルがないため初回モデルとして保存"
+    if candidate["trades"] < PROMOTION_MIN_TRADES:
+        return False, f"候補の取引数不足 ({candidate['trades']} < {PROMOTION_MIN_TRADES})"
+    if baseline["trades"] < PROMOTION_MIN_TRADES:
+        return True, f"既存モデルの取引数不足 ({baseline['trades']} < {PROMOTION_MIN_TRADES})"
+
+    improvement = candidate["objective"] - baseline["objective"]
+    # 浮動小数点の丸めで、ちょうど閾値の改善を誤って見送らないよう許容誤差を置く。
+    if improvement + 1e-12 < PROMOTION_MIN_OBJECTIVE_IMPROVEMENT:
+        return False, (
+            f"目的関数の改善不足 ({improvement:+.4f} < "
+            f"{PROMOTION_MIN_OBJECTIVE_IMPROVEMENT:+.4f})"
+        )
+    if candidate["win_rate"] < baseline["win_rate"] - PROMOTION_MAX_WIN_RATE_DECLINE:
+        return False, "勝率の低下が許容範囲を超過"
+    return True, f"目的関数改善 {improvement:+.4f}、勝率条件・取引数を満たしたため昇格"
+
+
 def add_stability_metrics(
     result: dict,
     scores,
@@ -916,35 +976,43 @@ def compute_barrier_outcome(
     target_return: float = TARGET_RETURN,
     stop_loss_pct: float = STOP_LOSS_PCT,
 ) -> tuple[pd.Series, pd.Series]:
-    """実際の運用ルール(利確なし・stop_loss_pct%損切り・horizon_days日時間決済)に
-    合わせてラベルと実現リターンを計算する。
+    """翌営業日始値約定の実運用ルールに合わせてラベルと実現リターンを計算する。
 
-    現在値(Close)を基準に、horizon_days日以内にLowが損切り水準を割ったらその時点で
-    損切り(realized_return=-stop_loss_pct, label=0)とし、割らなければhorizon_days後の
-    close-to-closeリターンで判定する(利確は行わないため上側バリアは設けない)。
-    従来の「horizon_days後の終値だけで判定」するラベルだと、途中で損切り水準を割って
-    から戻った銘柄まで「勝ち」として学習してしまう不整合があったため、これを解消する。
+    シグナル日 i の翌営業日始値で買い、horizon_days 営業日の保有中に損切りへ到達したら
+    決済する。寄り付きが損切り水準を下回った場合は、楽観的に損切り価格で約定したと
+    仮定せず、その日の始値で決済する。損切りされなければ i+1+horizon_days の始値で
+    時間決済する。これにより学習・しきい値評価・backtest_ml.py の約定前提を統一する。
     """
-    close = df["Close"].to_numpy(dtype=float)
+    open_ = df["Open"].to_numpy(dtype=float)
     low = df["Low"].to_numpy(dtype=float)
     n = len(df)
 
     labels = np.full(n, np.nan)
     realized = np.full(n, np.nan)
 
-    for i in range(n - horizon_days):
-        entry = close[i]
+    for i in range(n - LABEL_LOOKAHEAD_DAYS):
+        entry_idx = i + 1
+        exit_idx = entry_idx + horizon_days
+        entry = open_[entry_idx]
         if not np.isfinite(entry) or entry == 0:
             continue
         stop_price = entry * (1 - stop_loss_pct)
-        stopped_out = any(low[i + j] <= stop_price for j in range(1, horizon_days + 1))
-        if stopped_out:
-            realized[i] = -stop_loss_pct
-            labels[i] = 0
+        for day_idx in range(entry_idx, exit_idx):
+            if not np.isfinite(open_[day_idx]) or not np.isfinite(low[day_idx]):
+                break
+            if open_[day_idx] <= stop_price:
+                realized[i] = open_[day_idx] / entry - 1
+                labels[i] = 0
+                break
+            if low[day_idx] <= stop_price:
+                realized[i] = -stop_loss_pct
+                labels[i] = 0
+                break
         else:
-            time_return = close[i + horizon_days] / entry - 1
-            realized[i] = time_return
-            labels[i] = 1 if time_return >= target_return else 0
+            if np.isfinite(open_[exit_idx]):
+                time_return = open_[exit_idx] / entry - 1
+                realized[i] = time_return
+                labels[i] = 1 if time_return >= target_return else 0
 
     return pd.Series(labels, index=df.index), pd.Series(realized, index=df.index)
 
@@ -985,9 +1053,8 @@ def build_dataset() -> pd.DataFrame:
         # 実運用ルール(損切り・時間決済)に合わせたバリア方式でラベル・実現リターンを作成
         df["label"], df["future_return"] = compute_barrier_outcome(df)
 
-        # 特徴量・ラベルが揃っている行のみ使用(末尾HORIZON_DAYS行は未来データがないため除外)
+        # 特徴量・ラベルが揃っている行のみ使用(末尾は翌日約定+時間決済の未来データがないため除外)
         df = df.dropna(subset=FEATURE_COLUMNS + ["future_return", "label"])
-        df = df.iloc[:-HORIZON_DAYS] if len(df) > HORIZON_DAYS else df.iloc[0:0]
         df["label"] = df["label"].astype(int)
 
         df = df[["date"] + FEATURE_COLUMNS + ["future_return", "label"]].copy()
@@ -1003,6 +1070,12 @@ def build_dataset() -> pd.DataFrame:
 
 def main():
     print("学習データを作成中...")
+    try:
+        previous_bundle = joblib.load(MODEL_PATH)
+        print("既存モデルを読み込み、昇格判定の比較対象にします")
+    except FileNotFoundError:
+        previous_bundle = None
+        print("既存モデルがないため、今回の学習結果を初回モデルとして扱います")
     dataset = build_dataset()
     print(f"\n合計 {len(dataset)} 行 (上昇ラベル比率: {dataset['label'].mean():.3f})")
 
@@ -1021,15 +1094,15 @@ def main():
     train_end = int(len(dataset) * 0.7)
     val_end = int(len(dataset) * 0.85)
 
-    # エンバーゴ: ラベルがHORIZON_DAYS営業日先のリターンを使うため、単純な時系列分割では
+    # エンバーゴ: ラベルが翌日約定からLABEL_LOOKAHEAD_DAYS営業日先までの値動きを使うため、単純な時系列分割では
     # 境界付近の学習行のラベルが検証/テスト期間の値動きに依存し、情報が漏れる(評価が甘くなる)。
-    # 各境界の手前HORIZON_DAYS営業日分を除外し、分割の間に空白期間を設けて漏れを防ぐ。
+    # 各境界の手前LABEL_LOOKAHEAD_DAYS営業日分を除外し、分割の間に空白期間を設けて漏れを防ぐ。
     unique_dates = sorted(dataset["date"].unique().tolist())
 
     def embargo_cutoff(boundary_date):
-        """boundary_date のHORIZON_DAYS営業日前の日付を返す(これ以降の行を境界手前から除外)"""
+        """boundary_date の必要エンバーゴ日前の日付を返す"""
         idx = bisect.bisect_left(unique_dates, boundary_date)
-        return unique_dates[max(idx - HORIZON_DAYS, 0)]
+        return unique_dates[max(idx - LABEL_LOOKAHEAD_DAYS, 0)]
 
     val_start_date = dataset.iloc[train_end]["date"]
     test_start_date = dataset.iloc[val_end]["date"]
@@ -1044,7 +1117,7 @@ def main():
     print(f"学習データ: {train_df['date'].min()} 〜 {train_df['date'].max()} ({len(train_df)}行)")
     print(f"検証データ: {val_df['date'].min()} 〜 {val_df['date'].max()} ({len(val_df)}行)")
     print(f"テストデータ: {test_df['date'].min()} 〜 {test_df['date'].max()} ({len(test_df)}行)")
-    print(f"エンバーゴ: 学習<{train_cutoff} / 検証<{val_cutoff} (各境界 {HORIZON_DAYS}営業日を除外)")
+    print(f"エンバーゴ: 学習<{train_cutoff} / 検証<{val_cutoff} (各境界 {LABEL_LOOKAHEAD_DAYS}営業日を除外)")
 
     X_train, y_train = train_df[feature_columns], train_df["label"]
     X_val, y_val = val_df[feature_columns], val_df["label"]
@@ -1214,6 +1287,24 @@ def main():
         test_df["sector_label"],
         sector_ml_buy_thresholds,
     )
+
+    previous_eval = None
+    previous_eval_error = None
+    if previous_bundle is not None:
+        previous_eval, previous_eval_error = evaluate_model_bundle(previous_bundle, test_df)
+        if previous_eval is not None:
+            print(
+                "既存モデルの同一テスト期間評価: "
+                f"trades={previous_eval['trades']} "
+                f"win_rate={previous_eval['win_rate'] * 100:.1f}% "
+                f"avg_return={previous_eval['avg_return'] * 100:.2f}% "
+                f"objective={previous_eval['objective']:.4f}"
+            )
+        else:
+            print(f"既存モデル比較をスキップ: {previous_eval_error}")
+
+    promote, promotion_reason = should_promote_candidate(test_eval, previous_eval)
+    print(f"モデル昇格判定: {'昇格' if promote else '見送り'} — {promotion_reason}")
     print(
         f"\nテストデータでの最終評価(共通しきい値{ml_buy_threshold:.2f}+業種別調整、"
         f"往復コスト{TRANSACTION_COST * 100:.1f}%控除後): "
@@ -1246,8 +1337,7 @@ def main():
     else:
         print("採用する業種別ML買いしきい値: なし(全業種で共通しきい値を使用)")
 
-    joblib.dump(
-        {
+    candidate_bundle = {
             "model": model,
             "features": feature_columns,
             "sector_columns": sector_columns,
@@ -1259,6 +1349,7 @@ def main():
             "sector_threshold_results": sector_threshold_results,
             "threshold_optimization": {
                 "horizon_days": HORIZON_DAYS,
+                "label_lookahead_days": LABEL_LOOKAHEAD_DAYS,
                 "target_return": TARGET_RETURN,
                 "grid": THRESHOLD_GRID,
                 "transaction_cost": TRANSACTION_COST,
@@ -1267,7 +1358,7 @@ def main():
                 "metric": "stable_val_net_avg_return_with_win_hit_bonus_dynamic_market_filters",
             },
             "training_config": {
-                "embargo_days": HORIZON_DAYS,
+                "embargo_days": LABEL_LOOKAHEAD_DAYS,
                 "recency_halflife_days": RECENCY_HALFLIFE_DAYS,
                 "transaction_cost": TRANSACTION_COST,
                 "ensemble_seeds": ENSEMBLE_SEEDS,
@@ -1278,10 +1369,20 @@ def main():
             },
             "optuna_best_params": best,
             "optuna_best_value": study.best_value,
-        },
-        MODEL_PATH,
-    )
-    print(f"\nモデルを {MODEL_PATH} に保存しました")
+            "training_end_date": str(pd.to_datetime(train_df["date"].max()).date()),
+            "promotion": {
+                "promoted": promote,
+                "reason": promotion_reason,
+                "candidate_test_eval": test_eval,
+                "baseline_test_eval": previous_eval,
+                "baseline_comparison_error": previous_eval_error,
+            },
+        }
+    if promote:
+        joblib.dump(candidate_bundle, MODEL_PATH)
+        print(f"\n候補モデルを {MODEL_PATH} に保存しました")
+    else:
+        print("\n既存モデルを維持しました。候補モデルは保存しません。")
 
 
 if __name__ == "__main__":

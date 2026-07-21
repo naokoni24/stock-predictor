@@ -32,6 +32,7 @@ from train_model import (
     sector_base_threshold,
     FEATURE_COLUMNS,
     HORIZON_DAYS,
+    LABEL_LOOKAHEAD_DAYS,
     MODEL_PATH,
     RECENCY_HALFLIFE_DAYS,
     TRAIN_HISTORY_PERIOD,
@@ -139,6 +140,9 @@ def simulate_trade_exit(
     time_exit_idx = entry_idx + 1 + hold_days
     for j in range(entry_idx + 1, time_exit_idx):
         day = hist.iloc[j]
+        # 寄り付きで損切り水準を下回った場合、損切り価格で約定できたとは仮定しない。
+        if stop_price is not None and day["Open"] <= stop_price:
+            return (day["Open"] - buy_price) / buy_price * 100, j
         if stop_price is not None and day["Low"] <= stop_price:
             return (stop_price - buy_price) / buy_price * 100, j
         if tp_price is not None and day["High"] >= tp_price:
@@ -257,7 +261,6 @@ def build_backtest_dataset(
         source["label"], source["future_return"] = compute_barrier_outcome(source)
         source["rule_buy"] = source.apply(lambda row: make_signal_param(row) == "buy_candidate", axis=1)
         source = source.dropna(subset=FEATURE_COLUMNS + ["future_return", "label"])
-        source = source.iloc[:-HORIZON_DAYS] if len(source) > HORIZON_DAYS else source.iloc[0:0]
         if source.empty:
             continue
         source["label"] = source["label"].astype(int)
@@ -298,7 +301,7 @@ def selected_walk_forward_returns(
     sector_thresholds: dict[str, float] | None = None,
     require_rule_buy: bool = False,
 ) -> list[float]:
-    """評価月で買い判定になった行の5営業日後リターン(%)を返す"""
+    """評価月で買い判定になった行の翌営業日始値約定ベース実現リターン(%)を返す"""
     returns = []
     for score, (_, row) in zip(scores, fold_df.iterrows()):
         sector = str(row.get("sector_label", "不明"))
@@ -340,14 +343,14 @@ def run_walk_forward_evaluation(dataset: pd.DataFrame, sector_columns: list[str]
         f"{'thr':>5} {'ML件数':>7} {'ML勝率':>7} {'ML平均':>8} {'一致件数':>8} {'一致平均':>9}"
     )
 
-    embargo = pd.offsets.BDay(HORIZON_DAYS)
+    embargo = pd.offsets.BDay(LABEL_LOOKAHEAD_DAYS)
     for period in periods:
         test_start = period.to_timestamp()
         test_end = (period + 1).to_timestamp()
         val_start = test_start - pd.DateOffset(months=WALK_FORWARD_VALIDATION_MONTHS)
 
         # エンバーゴ: 5営業日先ラベルが境界をまたいで漏れるのを防ぐため、
-        # train/val の各末尾HORIZON_DAYS営業日を除外する(train_model.pyと同じ思想)。
+        # train/val の各末尾を翌日約定+時間決済に必要な営業日分除外する(train_model.pyと同じ思想)。
         train_df = dataset[dataset["date"] < (val_start - embargo)]
         val_df = dataset[(dataset["date"] >= val_start) & (dataset["date"] < (test_start - embargo))]
         test_df = dataset[(dataset["date"] >= test_start) & (dataset["date"] < test_end)]
