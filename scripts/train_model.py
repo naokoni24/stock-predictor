@@ -480,6 +480,8 @@ def evaluate_threshold(
     feature_rows: pd.DataFrame | None = None,
     sectors: pd.Series | None = None,
     sector_thresholds: dict[str, float] | None = None,
+    dates=None,
+    max_daily_candidates: int = 0,
 ) -> dict:
     """指定しきい値で買った場合の5営業日後リターンを評価する。
 
@@ -507,6 +509,35 @@ def evaluate_threshold(
         mask = (scores >= thresholds) & ~blocked
     else:
         mask = scores >= threshold
+
+    # 日次推論と同じく、しきい値・買わないフィルター通過後のスコア上位だけを採用する。
+    # 昇格判定でこの制限を入れないと、本番では選ばれない下位候補の成績で判定してしまう。
+    if max_daily_candidates > 0:
+        if dates is None:
+            raise ValueError("max_daily_candidatesを使う場合はdatesが必要です")
+        date_values = np.asarray(pd.Series(dates).to_numpy())
+        if len(date_values) != len(scores):
+            raise ValueError("datesとscoresの件数が一致しません")
+        eligible_positions = np.flatnonzero(mask)
+        ranked = pd.DataFrame(
+            {
+                "position": eligible_positions,
+                "date": date_values[eligible_positions],
+                "score": scores[eligible_positions],
+            }
+        )
+        selected_positions = (
+            ranked.sort_values(
+                ["date", "score", "position"],
+                ascending=[True, False, True],
+            )
+            .groupby("date", sort=False)
+            .head(max_daily_candidates)["position"]
+            .to_numpy(dtype=int)
+        )
+        mask = np.zeros(len(scores), dtype=bool)
+        mask[selected_positions] = True
+
     gross_returns = future_returns[mask]
     trades = int(mask.sum())
     if trades == 0:
@@ -519,6 +550,7 @@ def evaluate_threshold(
             "avg_return_gross": 0.0,
             "total_return": 0.0,
             "cost_per_trade": TRANSACTION_COST,
+            "max_daily_candidates": max_daily_candidates,
             "objective": float("-inf"),
         }
 
@@ -541,6 +573,7 @@ def evaluate_threshold(
         "avg_return_gross": float(gross_returns.mean()),
         "total_return": total_return,
         "cost_per_trade": TRANSACTION_COST,
+        "max_daily_candidates": max_daily_candidates,
         "objective": objective,
     }
 
@@ -554,9 +587,21 @@ def evaluate_model_bundle(
     過去のモデルに必要な特徴量がなければ、無理に比較して昇格させない。
     """
     features = bundle.get("features", [])
+    if not features:
+        return None, "既存モデルの特徴量メタ情報がない"
+
+    evaluation_df = evaluation_df.copy()
     missing = [column for column in features if column not in evaluation_df.columns]
-    if not features or missing:
-        return None, f"既存モデルの特徴量が評価データにない ({', '.join(missing[:3])})"
+    missing_sector_columns = [column for column in missing if column.startswith("sector_")]
+    missing_non_sector_columns = [column for column in missing if not column.startswith("sector_")]
+    for column in missing_sector_columns:
+        # 学習時のユニバースにだけ存在した業種は、今回の評価行では全銘柄が非該当なので0が正しい。
+        evaluation_df[column] = 0.0
+    if missing_non_sector_columns:
+        return None, (
+            "既存モデルの数値特徴量が評価データにない "
+            f"({', '.join(missing_non_sector_columns[:3])})"
+        )
 
     try:
         raw_scores = bundle["model"].predict_proba(evaluation_df[features])[:, 1]
@@ -564,6 +609,9 @@ def evaluate_model_bundle(
         return None, f"既存モデルの推論に失敗 ({exc})"
 
     scores = calibrate_scores(raw_scores, bundle.get("score_calibration"))
+    max_daily_candidates = int(
+        bundle.get("training_config", {}).get("max_daily_ml_buy_candidates", 0) or 0
+    )
     result = evaluate_threshold(
         scores,
         evaluation_df["future_excess_return"].to_numpy(),
@@ -571,6 +619,8 @@ def evaluate_model_bundle(
         evaluation_df,
         evaluation_df["sector_label"],
         bundle.get("sector_ml_buy_thresholds", {}),
+        dates=evaluation_df["date"],
+        max_daily_candidates=max_daily_candidates,
     )
     return result, None
 
@@ -1373,6 +1423,8 @@ def main():
         test_df,
         test_df["sector_label"],
         sector_ml_buy_thresholds,
+        dates=test_df["date"],
+        max_daily_candidates=MAX_DAILY_ML_BUY_CANDIDATES,
     )
 
     previous_eval = None
@@ -1393,7 +1445,8 @@ def main():
     promote, promotion_reason = should_promote_candidate(test_eval, previous_eval)
     print(f"モデル昇格判定: {'昇格' if promote else '見送り'} — {promotion_reason}")
     print(
-        f"\nテストデータでの最終評価(市場・業種に対する超過リターン、共通しきい値{ml_buy_threshold:.2f}+業種別調整、"
+        f"\nテストデータでの最終評価(市場・業種に対する超過リターン、日次上位{MAX_DAILY_ML_BUY_CANDIDATES}件、"
+        f"共通しきい値{ml_buy_threshold:.2f}+業種別調整、"
         f"往復コスト{TRANSACTION_COST * 100:.1f}%控除後): "
         f"trades={test_eval['trades']} win_rate={test_eval['win_rate'] * 100:.1f}% "
         f"avg_return={test_eval['avg_return'] * 100:.2f}% total_return={test_eval['total_return'] * 100:.1f}%"
