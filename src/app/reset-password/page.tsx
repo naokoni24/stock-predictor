@@ -31,6 +31,10 @@ export default function ResetPasswordPage() {
       return;
     }
 
+    // パスワード再設定はこのタブで明示的に認証した操作なので、
+    // トップページ遷移後にブラウザ再起動由来のCookieと誤判定して
+    // 即時ログアウトしないよう、現在のタブを有効な認証セッションとして記録する。
+    sessionStorage.setItem("authBrowserSession", "active");
     setDone(true);
     setTimeout(() => router.push("/"), 1500);
   };
