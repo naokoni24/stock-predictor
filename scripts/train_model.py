@@ -96,6 +96,12 @@ PROMOTION_MIN_TRADES = 30
 PROMOTION_MIN_OBJECTIVE_IMPROVEMENT = 0.001  # 1取引あたり0.10%相当
 PROMOTION_MAX_WIN_RATE_DECLINE = 0.02
 
+# 候補モデルが最低限満たすべき絶対的な期待値(市場・業種超過リターン、コスト控除後)。
+# 2026-07-30、既存モデルとの相対比較のみで判定していたため、ベースライン自体が
+# マイナスの場合に絶対値マイナスの候補が「相対的にマシ」なだけで昇格する事故が発生した。
+# ベースライン有無に関わらず必ずこの下限を満たすことを昇格の必須条件にする。
+PROMOTION_MIN_AVG_RETURN = 0.0
+
 # 特徴量選択: 正規化gain重要度がこの割合未満の特徴量を除外する(過学習・ノイズ削減)。
 # 環境変数 SELECT_FEATURES=0 で無効化できる(A/B比較用)。
 MIN_FEATURE_IMPORTANCE = 0.001
@@ -687,9 +693,16 @@ def evaluate_model_bundle(
 
 def should_promote_candidate(candidate: dict, baseline: dict | None) -> tuple[bool, str]:
     """再学習候補を本番モデルへ昇格させるかを決める。"""
+    if candidate["avg_return"] < PROMOTION_MIN_AVG_RETURN:
+        # ベースラインとの相対比較より先に絶対値を必ずチェックする。
+        # ベースライン自体がマイナスの場合、相対改善だけでは絶対値マイナスの候補を弾けないため。
+        return False, (
+            "候補の絶対的な期待値が基準未満 "
+            f"(avg_return={candidate['avg_return']:+.4f} < {PROMOTION_MIN_AVG_RETURN:+.4f})"
+        )
     if baseline is None:
-        # 初回導入時だけは比較対象がないため候補を保存し、次回から厳格比較する。
-        return True, "比較可能な既存モデルがないため初回モデルとして保存"
+        # 絶対値基準を満たした場合のみ、比較対象がない初回モデルとして保存する。
+        return True, "絶対値基準を満たし、比較可能な既存モデルもないため初回モデルとして保存"
     if candidate["trades"] < PROMOTION_MIN_TRADES:
         return False, f"候補の取引数不足 ({candidate['trades']} < {PROMOTION_MIN_TRADES})"
     if baseline["trades"] < PROMOTION_MIN_TRADES:
