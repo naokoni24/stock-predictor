@@ -92,6 +92,7 @@ def predict_ml(model_bundle, hist, nikkei, sector=None, feature_df=None, news_se
     from train_model import (
         adjusted_ml_buy_threshold,
         build_features,
+        ensemble_disagreement,
         ml_buy_block_reasons,
         sector_base_threshold,
     )
@@ -110,6 +111,7 @@ def predict_ml(model_bundle, hist, nikkei, sector=None, feature_df=None, news_se
     features = pd.DataFrame([row[model_bundle["features"]]])
 
     raw_score = float(model_bundle["model"].predict_proba(features)[0, 1])
+    disagreement = float(ensemble_disagreement(model_bundle["model"], features)[0])
 
     # 学習データ全体での予測確率の分布が偏っているため、分位点テーブルで0〜1に較正する。
     # 50%が「平均的な銘柄」、両端が相対的に強気/弱気な銘柄を表す。
@@ -133,6 +135,11 @@ def predict_ml(model_bundle, hist, nikkei, sector=None, feature_df=None, news_se
         row,
     )
     block_reasons = ml_buy_block_reasons(row)
+    max_disagreement = model_bundle.get("ensemble_disagreement", {}).get("max")
+    if max_disagreement is not None and disagreement > float(max_disagreement):
+        block_reasons.append(
+            f"アンサンブル不一致が大きい ({disagreement:.3f} > {float(max_disagreement):.3f})"
+        )
     signal = "buy_candidate" if score >= threshold and not block_reasons else "hold"
     if score >= threshold and block_reasons:
         print(f"ML buy blocked: reasons={','.join(block_reasons)} score={score:.4f} threshold={threshold:.2f}")

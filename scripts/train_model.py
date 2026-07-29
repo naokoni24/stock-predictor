@@ -68,6 +68,11 @@ TRANSACTION_COST = 0.002
 # Optunaの試行は速度優先で先頭シードのみ、最終モデルとwalk-forward評価は全シードを使う。
 ENSEMBLE_SEEDS = [42, 202, 777]
 
+# soft votingを構成する個別推定器の確率の標準偏差。値が大きい候補は、
+# モデル間で見解が割れているため、検証期間で選んだ上限を超えた場合は見送る。
+# None はフィルターなしで、既存モデルとの後方互換にも使う。
+ENSEMBLE_DISAGREEMENT_GRID = [None, 0.04, 0.06, 0.08, 0.10, 0.12]
+
 # 買い判定のしきい値候補。再学習時にテストデータのバックテスト成績で最適値を選ぶ。
 THRESHOLD_GRID = [round(x, 3) for x in [0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80]]
 
@@ -103,6 +108,10 @@ MARKET_INDICES = {
     "sox": ["^SOX"],
     "vix": ["^VIX"],
 }
+
+# 米国指数・USD/JPYの日足終値は日本市場の取引時間後に確定するため、
+# 日本株の特徴量としては次の日本の営業日から利用する。同日付で結合すると未来情報になる。
+MARKET_DATA_AVAILABLE_NEXT_JP_BUSINESS_DAY = {"usdjpy", "nasdaq", "sox", "vix"}
 
 MARKET_METRICS = [
     "return_1d",
@@ -225,6 +234,25 @@ def build_voting_model(
             ),
         ))
     return VotingClassifier(estimators=estimators, voting="soft")
+
+
+def ensemble_disagreement(model, X) -> np.ndarray:
+    """soft voting内の個別推定器の予測確率の標準偏差を返す。
+
+    保存済みの旧モデルなどで個別推定器を取得できない場合は0を返し、
+    後方互換を保つ。値が高いほど推定器間の見解が割れている。
+    """
+    estimators = getattr(model, "estimators_", None)
+    if not estimators:
+        return np.zeros(len(X), dtype=float)
+    probabilities = [
+        estimator.predict_proba(X)[:, 1]
+        for estimator in estimators
+        if hasattr(estimator, "predict_proba")
+    ]
+    if len(probabilities) < 2:
+        return np.zeros(len(X), dtype=float)
+    return np.std(np.vstack(probabilities), axis=0)
 
 
 def market_default_value(column: str) -> float:
@@ -482,6 +510,8 @@ def evaluate_threshold(
     sector_thresholds: dict[str, float] | None = None,
     dates=None,
     max_daily_candidates: int = 0,
+    disagreements=None,
+    max_ensemble_disagreement: float | None = None,
 ) -> dict:
     """指定しきい値で買った場合の5営業日後リターンを評価する。
 
@@ -509,6 +539,14 @@ def evaluate_threshold(
         mask = (scores >= thresholds) & ~blocked
     else:
         mask = scores >= threshold
+
+    if max_ensemble_disagreement is not None:
+        if disagreements is None:
+            raise ValueError("アンサンブル不一致フィルターを使う場合はdisagreementsが必要です")
+        disagreements = np.asarray(disagreements, dtype=float)
+        if len(disagreements) != len(scores):
+            raise ValueError("disagreementsとscoresの件数が一致しません")
+        mask &= np.isfinite(disagreements) & (disagreements <= max_ensemble_disagreement)
 
     # 日次推論と同じく、しきい値・買わないフィルター通過後のスコア上位だけを採用する。
     # 昇格判定でこの制限を入れないと、本番では選ばれない下位候補の成績で判定してしまう。
@@ -551,6 +589,7 @@ def evaluate_threshold(
             "total_return": 0.0,
             "cost_per_trade": TRANSACTION_COST,
             "max_daily_candidates": max_daily_candidates,
+            "max_ensemble_disagreement": max_ensemble_disagreement,
             "objective": float("-inf"),
         }
 
@@ -574,6 +613,7 @@ def evaluate_threshold(
         "total_return": total_return,
         "cost_per_trade": TRANSACTION_COST,
         "max_daily_candidates": max_daily_candidates,
+        "max_ensemble_disagreement": max_ensemble_disagreement,
         "objective": objective,
     }
 
@@ -612,6 +652,12 @@ def evaluate_model_bundle(
     max_daily_candidates = int(
         bundle.get("training_config", {}).get("max_daily_ml_buy_candidates", 0) or 0
     )
+    max_ensemble_disagreement = bundle.get("ensemble_disagreement", {}).get("max")
+    disagreements = (
+        ensemble_disagreement(bundle["model"], evaluation_df[features])
+        if max_ensemble_disagreement is not None
+        else None
+    )
     result = evaluate_threshold(
         scores,
         evaluation_df["future_excess_return"].to_numpy(),
@@ -621,6 +667,8 @@ def evaluate_model_bundle(
         bundle.get("sector_ml_buy_thresholds", {}),
         dates=evaluation_df["date"],
         max_daily_candidates=max_daily_candidates,
+        disagreements=disagreements,
+        max_ensemble_disagreement=max_ensemble_disagreement,
     )
     return result, None
 
@@ -824,6 +872,55 @@ def optimize_sector_thresholds(
     return sector_thresholds, sector_results
 
 
+def optimize_ensemble_disagreement(
+    scores,
+    disagreements,
+    future_returns,
+    threshold: float,
+    feature_rows: pd.DataFrame,
+    sectors: pd.Series,
+    sector_thresholds: dict[str, float],
+    dates,
+    max_daily_candidates: int,
+) -> tuple[float | None, list[dict]]:
+    """検証期間だけでアンサンブル不一致の上限を選ぶ。
+
+    取引数が少なすぎる上限は除外し、改善がなければNone（フィルターなし）を選べる。
+    日次上位件数・市場/業種フィルターも本番と同じ条件で評価する。
+    """
+    min_trades = max(30, int(len(scores) * 0.02))
+    results = []
+    for limit in ENSEMBLE_DISAGREEMENT_GRID:
+        result = evaluate_threshold(
+            scores,
+            future_returns,
+            threshold,
+            feature_rows,
+            sectors,
+            sector_thresholds,
+            dates=dates,
+            max_daily_candidates=max_daily_candidates,
+            disagreements=disagreements if limit is not None else None,
+            max_ensemble_disagreement=limit,
+        )
+        result["max_ensemble_disagreement"] = limit
+        results.append(result)
+
+    valid = [result for result in results if result["trades"] >= min_trades]
+    if not valid:
+        return None, results
+    best = max(
+        valid,
+        key=lambda result: (
+            result["objective"],
+            result["avg_return"],
+            result["win_rate"],
+            result["trades"],
+        ),
+    )
+    return best["max_ensemble_disagreement"], results
+
+
 def build_market_features(symbols: str | list[str], prefix: str) -> pd.DataFrame:
     """市場指数・為替データを同じ形式の特徴量へ変換"""
     if isinstance(symbols, str):
@@ -847,7 +944,12 @@ def build_market_features(symbols: str | list[str], prefix: str) -> pd.DataFrame
 
     print(f"market data loaded: {prefix}={used_symbol}")
     hist = hist.reset_index()
-    hist["date"] = pd.to_datetime(hist["Date"]).dt.date
+    source_dates = pd.to_datetime(hist["Date"])
+    if prefix in MARKET_DATA_AVAILABLE_NEXT_JP_BUSINESS_DAY:
+        # 祝日は日本市場の行がないため、build_featuresのforward fillによって
+        # 次の実際の日本取引日に初めて反映される。
+        source_dates = source_dates + pd.offsets.BDay(1)
+    hist["date"] = source_dates.dt.date
     hist[f"{prefix}_return_1d"] = hist["Close"] / hist["Close"].shift(1) - 1
     hist[f"{prefix}_return_5d"] = hist["Close"] / hist["Close"].shift(5) - 1
     hist[f"{prefix}_return_20d"] = hist["Close"] / hist["Close"].shift(20) - 1
@@ -1412,10 +1514,23 @@ def main():
         val_df["sector_label"],
         dates=val_df["date"],
     )
+    val_disagreements = ensemble_disagreement(model, val_df[feature_columns])
+    max_ensemble_disagreement, disagreement_results = optimize_ensemble_disagreement(
+        val_scores,
+        val_disagreements,
+        val_df["future_excess_return"].to_numpy(),
+        ml_buy_threshold,
+        val_df,
+        val_df["sector_label"],
+        sector_ml_buy_thresholds,
+        val_df["date"],
+        MAX_DAILY_ML_BUY_CANDIDATES,
+    )
 
     # テストデータ(完全に未使用のデータ)でしきい値の最終評価を行う
     test_raw_proba = model.predict_proba(test_df[feature_columns])[:, 1]
     test_scores = calibrate_scores(test_raw_proba, calibration_values)
+    test_disagreements = ensemble_disagreement(model, test_df[feature_columns])
     test_eval = evaluate_threshold(
         test_scores,
         test_df["future_excess_return"].to_numpy(),
@@ -1425,6 +1540,8 @@ def main():
         sector_ml_buy_thresholds,
         dates=test_df["date"],
         max_daily_candidates=MAX_DAILY_ML_BUY_CANDIDATES,
+        disagreements=test_disagreements,
+        max_ensemble_disagreement=max_ensemble_disagreement,
     )
 
     previous_eval = None
@@ -1460,6 +1577,10 @@ def main():
             f"{result['avg_return'] * 100:>10.2f}% {result['total_return'] * 100:>12.1f}%"
         )
     print(f"採用するML買いしきい値: {ml_buy_threshold:.2f}")
+    print(
+        "採用するアンサンブル不一致上限: "
+        + (f"{max_ensemble_disagreement:.3f}" if max_ensemble_disagreement is not None else "なし")
+    )
     chosen = next((r for r in threshold_results if r["threshold"] == ml_buy_threshold), None)
     if chosen and chosen.get("sub_periods"):
         print("採用しきい値のサブ期間別成績(安定性チェック):")
@@ -1487,6 +1608,12 @@ def main():
             "sector_ml_buy_thresholds": sector_ml_buy_thresholds,
             "threshold_results": threshold_results,
             "sector_threshold_results": sector_threshold_results,
+            "ensemble_disagreement": {
+                "max": max_ensemble_disagreement,
+                "grid": ENSEMBLE_DISAGREEMENT_GRID,
+                "results": disagreement_results,
+                "metric": "validation_net_excess_return_objective",
+            },
             "threshold_optimization": {
                 "horizon_days": HORIZON_DAYS,
                 "label_lookahead_days": LABEL_LOOKAHEAD_DAYS,
@@ -1508,6 +1635,7 @@ def main():
                 "selected_feature_count": len(feature_columns),
                 "total_feature_count": len(all_feature_columns),
                 "max_daily_ml_buy_candidates": MAX_DAILY_ML_BUY_CANDIDATES,
+                "market_data_alignment": "us_fx_next_jp_business_day",
             },
             "optuna_best_params": best,
             "optuna_best_value": study.best_value,
