@@ -16,7 +16,7 @@ order by ticker, date desc;
 -- 古い表示用データを削除する関数。
 -- prices: チャート表示用。180日を残す。
 -- signals: 履歴確認用。400日を残す。
--- news: 最新ニュース表示用。90日を残す。
+-- news: ML用の時系列センチメント特徴量に使うため1年を残す。
 create or replace function prune_free_tier_data()
 returns table (
   deleted_prices bigint,
@@ -47,7 +47,7 @@ begin
   with deleted as (
     delete from news
     where published_at is not null
-      and published_at < now() - interval '90 days'
+      and published_at < now() - interval '1 year'
     returning 1
   )
   select count(*) into news_count from deleted;

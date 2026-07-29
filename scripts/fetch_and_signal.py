@@ -122,8 +122,10 @@ def predict_ml(model_bundle, hist, nikkei, sector=None, feature_df=None, news_se
     else:
         score = raw_score
 
-    # ニュースセンチメントで微調整(-1.0〜1.0 を ±NEWS_SENTIMENT_WEIGHT に変換)
-    score = score + news_sentiment * NEWS_SENTIMENT_WEIGHT
+    # 新モデルは時系列ニュース特徴量を直接学習する。旧モデルだけは従来の
+    # 単発7日平均による補正を残し、再学習・昇格までの挙動を変えない。
+    if not any(column.startswith("news_") for column in model_bundle["features"]):
+        score = score + news_sentiment * NEWS_SENTIMENT_WEIGHT
     score = min(max(score, 0.0), 1.0)
     base_threshold = sector_base_threshold(
         float(model_bundle.get("ml_buy_threshold", ML_BUY_THRESHOLD)),
@@ -552,10 +554,24 @@ def main():
 
     feature_frames = {}
     if model_bundle is not None:
-        from train_model import add_breadth_features, add_sector_relative_features, build_features
+        from train_model import (
+            add_breadth_features,
+            add_sector_relative_features,
+            build_features,
+            load_news_feature_frames,
+        )
+
+        history_dates = [pd.to_datetime(hist["Date"]).min() for hist in histories.values()]
+        latest_dates = [pd.to_datetime(hist["Date"]).max() for hist in histories.values()]
+        news_feature_frames = load_news_feature_frames(
+            list(histories),
+            min(history_dates),
+            max(latest_dates),
+            sb=sb,
+        )
 
         feature_frames = {
-            ticker: build_features(hist, nikkei)
+            ticker: build_features(hist, nikkei, news_feature_frames.get(ticker))
             for ticker, hist in histories.items()
         }
         feature_frames = add_sector_relative_features(feature_frames, jp_sectors)

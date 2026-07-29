@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 import optuna
+from supabase import create_client
 
 from fetch_and_signal import TICKERS, calc_rsi, calc_macd, calc_bollinger, calc_adx, get_screener_tickers, get_jp_sector_map
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier
@@ -137,6 +138,16 @@ SECTOR_FEATURE_COLUMNS = [
     "sector_relative_strength_20d",
 ]
 
+# Google News RSSから保存したセンチメントを、翌営業日以降に使える時系列特徴量へ集約する。
+# scoreはニュースがない日は0、countは直近7日間の記事数。中立記事とニュースなしを区別できる。
+NEWS_FEATURE_COLUMNS = [
+    "news_sentiment_1d",
+    "news_sentiment_3d",
+    "news_sentiment_7d",
+    "news_sentiment_trend_1d_7d",
+    "news_article_count_7d",
+]
+
 # 市場ブレッドス(全銘柄共通)とクロスセクショナル順位(銘柄別)の特徴量。
 # 日経・TOPIXなどの指数とは別に、処理対象ユニバース内部の強さと
 # その日の全銘柄の中での相対的な位置を表す。add_breadth_features で算出する。
@@ -193,6 +204,7 @@ FEATURE_COLUMNS = (
     + MARKET_FEATURE_COLUMNS
     + SECTOR_FEATURE_COLUMNS
     + BREADTH_FEATURE_COLUMNS
+    + NEWS_FEATURE_COLUMNS
 )
 
 import os
@@ -991,7 +1003,106 @@ def get_nikkei_returns() -> pd.DataFrame:
     return market[["date"] + MARKET_FEATURE_COLUMNS + extra_columns]
 
 
-def build_features(hist: pd.DataFrame, nikkei: pd.DataFrame | None = None) -> pd.DataFrame:
+def build_news_feature_frames(
+    news_rows: list[dict],
+    tickers: list[str],
+    start_date,
+    end_date,
+) -> dict[str, pd.DataFrame]:
+    """保存済みニュースを銘柄別の日次センチメント特徴量へ集約する。
+
+    記事の公開日には使わず、次の営業日から使う。これにより日中に公開された
+    ニュースを当日の終値ベース特徴量へ混ぜる未来情報を避ける。
+    """
+    if not news_rows:
+        return {}
+    news = pd.DataFrame(news_rows)
+    required = {"ticker", "published_at", "sentiment_score"}
+    if news.empty or not required.issubset(news.columns):
+        return {}
+    news["published_at"] = pd.to_datetime(news["published_at"], utc=True, errors="coerce")
+    news["sentiment_score"] = pd.to_numeric(news["sentiment_score"], errors="coerce")
+    news = news.dropna(subset=["published_at", "sentiment_score"])
+    if news.empty:
+        return {}
+    news["available_date"] = (
+        news["published_at"].dt.tz_convert("Asia/Tokyo").dt.tz_localize(None).dt.normalize()
+        + pd.offsets.BDay(1)
+    )
+    start = pd.Timestamp(start_date).normalize()
+    end = pd.Timestamp(end_date).normalize()
+    calendar = pd.date_range(start, end, freq="D")
+    result: dict[str, pd.DataFrame] = {}
+    for ticker in tickers:
+        ticker_news = news[news["ticker"] == ticker]
+        if ticker_news.empty:
+            continue
+        daily = ticker_news.groupby("available_date").agg(
+            sentiment_score=("sentiment_score", "mean"),
+            article_count=("sentiment_score", "size"),
+        )
+        daily = daily.reindex(calendar)
+        score_1d = daily["sentiment_score"].rolling("1D", min_periods=1).mean().fillna(0.0)
+        score_3d = daily["sentiment_score"].rolling("3D", min_periods=1).mean().fillna(0.0)
+        score_7d = daily["sentiment_score"].rolling("7D", min_periods=1).mean().fillna(0.0)
+        count_7d = daily["article_count"].rolling("7D", min_periods=1).sum().fillna(0.0)
+        result[ticker] = pd.DataFrame(
+            {
+                "date": calendar.date,
+                "news_sentiment_1d": score_1d.to_numpy(),
+                "news_sentiment_3d": score_3d.to_numpy(),
+                "news_sentiment_7d": score_7d.to_numpy(),
+                "news_sentiment_trend_1d_7d": (score_1d - score_7d).to_numpy(),
+                "news_article_count_7d": count_7d.to_numpy(),
+            }
+        )
+    return result
+
+
+def load_news_feature_frames(
+    tickers: list[str],
+    start_date,
+    end_date,
+    sb=None,
+) -> dict[str, pd.DataFrame]:
+    """Supabaseのnewsから必要な期間だけ取得する。認証情報がない環境では空を返す。"""
+    if not tickers:
+        return {}
+    if sb is None:
+        url = os.environ.get("SUPABASE_URL")
+        key = os.environ.get("SUPABASE_SERVICE_KEY")
+        if not url or not key:
+            print("news features unavailable: Supabase認証情報がないため中立値を使用")
+            return {}
+        sb = create_client(url, key)
+    since = (pd.Timestamp(start_date) - pd.Timedelta(days=8)).isoformat()
+    rows = []
+    for offset in range(0, len(tickers), 100):
+        batch = tickers[offset : offset + 100]
+        page_start = 0
+        while True:
+            response = (
+                sb.table("news")
+                .select("ticker,published_at,sentiment_score")
+                .in_("ticker", batch)
+                .gte("published_at", since)
+                .range(page_start, page_start + 999)
+                .execute()
+            )
+            page = response.data or []
+            rows.extend(page)
+            if len(page) < 1000:
+                break
+            page_start += 1000
+    print(f"news features loaded: {len(rows)} articles")
+    return build_news_feature_frames(rows, tickers, start_date, end_date)
+
+
+def build_features(
+    hist: pd.DataFrame,
+    nikkei: pd.DataFrame | None = None,
+    news_features: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     """株価履歴(Close, sma25, sma75, rsi14, macd, macd_signal, bb_upper, bb_lower)から特徴量を作成"""
     df = hist.copy()
     df["date"] = pd.to_datetime(df["Date"]).dt.date
@@ -1077,6 +1188,13 @@ def build_features(hist: pd.DataFrame, nikkei: pd.DataFrame | None = None) -> pd
         df["topix_benchmark_return"] = np.nan
         for column in MARKET_FEATURE_COLUMNS:
             df[column] = market_default_value(column)
+
+    if news_features is not None and not news_features.empty:
+        df = df.merge(news_features, on="date", how="left")
+    for column in NEWS_FEATURE_COLUMNS:
+        if column not in df.columns:
+            df[column] = 0.0
+        df[column] = df[column].fillna(0.0)
 
     for column in SECTOR_FEATURE_COLUMNS:
         if column not in df.columns:
@@ -1270,6 +1388,12 @@ def build_dataset() -> pd.DataFrame:
 
     nikkei = get_nikkei_returns()
     sectors = get_jp_sector_map()
+    today = pd.Timestamp.now(tz="Asia/Tokyo").tz_localize(None).normalize()
+    news_feature_frames = load_news_feature_frames(
+        list(all_tickers),
+        today - pd.DateOffset(years=2),
+        today,
+    )
 
     feature_frames = {}
     for ticker in all_tickers:
@@ -1283,7 +1407,7 @@ def build_dataset() -> pd.DataFrame:
         hist["macd"], hist["macd_signal"] = calc_macd(hist["Close"])
         hist["bb_upper"], hist["bb_lower"] = calc_bollinger(hist["Close"])
 
-        df = build_features(hist, nikkei)
+        df = build_features(hist, nikkei, news_feature_frames.get(ticker))
         feature_frames[ticker] = df
 
     feature_frames = add_sector_relative_features(feature_frames, sectors)
@@ -1602,7 +1726,7 @@ def main():
             "model": model,
             "features": feature_columns,
             "sector_columns": sector_columns,
-            "feature_version": "candlestick_features_v1",
+            "feature_version": "candlestick_news_timeseries_v2",
             "score_calibration": calibration_values,
             "ml_buy_threshold": ml_buy_threshold,
             "sector_ml_buy_thresholds": sector_ml_buy_thresholds,
@@ -1636,6 +1760,7 @@ def main():
                 "total_feature_count": len(all_feature_columns),
                 "max_daily_ml_buy_candidates": MAX_DAILY_ML_BUY_CANDIDATES,
                 "market_data_alignment": "us_fx_next_jp_business_day",
+                "news_feature_columns": NEWS_FEATURE_COLUMNS,
             },
             "optuna_best_params": best,
             "optuna_best_value": study.best_value,

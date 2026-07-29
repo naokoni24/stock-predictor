@@ -28,6 +28,7 @@ from train_model import (
     evaluate_threshold,
     get_nikkei_returns,
     is_ml_buy_blocked,
+    load_news_feature_frames,
     optimize_ml_buy_threshold,
     optimize_ensemble_disagreement,
     optimize_sector_thresholds,
@@ -559,8 +560,14 @@ def main():
     sector_thresholds = bundle.get("sector_ml_buy_thresholds", {})
     max_ensemble_disagreement = bundle.get("ensemble_disagreement", {}).get("max")
     jp_sectors = get_jp_sector_map()
+    history_dates = [pd.to_datetime(hist["Date"]) for hist in histories.values()]
+    news_feature_frames = load_news_feature_frames(
+        list(histories),
+        min(dates.min() for dates in history_dates),
+        max(dates.max() for dates in history_dates),
+    )
     feature_frames = {
-        ticker: build_features(hist, nikkei)
+        ticker: build_features(hist, nikkei, news_feature_frames.get(ticker))
         for ticker, hist in histories.items()
     }
     feature_frames = add_sector_relative_features(feature_frames, jp_sectors)
