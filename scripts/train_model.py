@@ -154,6 +154,17 @@ NEWS_FEATURE_COLUMNS = [
     "news_article_count_7d",
 ]
 
+# 日本株で繰り返し現れやすい曜日・月初月末・月次需給を、将来の価格を使わずに表す。
+# 周期量はsin/cosにして12月と1月、金曜と月曜の人工的な距離を小さく扱う。
+CALENDAR_FEATURE_COLUMNS = [
+    "calendar_weekday_sin",
+    "calendar_weekday_cos",
+    "calendar_month_sin",
+    "calendar_month_cos",
+    "calendar_month_start",
+    "calendar_month_end",
+]
+
 # 市場ブレッドス(全銘柄共通)とクロスセクショナル順位(銘柄別)の特徴量。
 # 日経・TOPIXなどの指数とは別に、処理対象ユニバース内部の強さと
 # その日の全銘柄の中での相対的な位置を表す。add_breadth_features で算出する。
@@ -211,6 +222,7 @@ FEATURE_COLUMNS = (
     + SECTOR_FEATURE_COLUMNS
     + BREADTH_FEATURE_COLUMNS
     + NEWS_FEATURE_COLUMNS
+    + CALENDAR_FEATURE_COLUMNS
 )
 
 import os
@@ -1119,6 +1131,18 @@ def build_features(
     """株価履歴(Close, sma25, sma75, rsi14, macd, macd_signal, bb_upper, bb_lower)から特徴量を作成"""
     df = hist.copy()
     df["date"] = pd.to_datetime(df["Date"]).dt.date
+    calendar_dates = pd.to_datetime(df["date"])
+    weekday_phase = 2 * np.pi * calendar_dates.dt.dayofweek / 5
+    month_phase = 2 * np.pi * (calendar_dates.dt.month - 1) / 12
+    df["calendar_weekday_sin"] = np.sin(weekday_phase)
+    df["calendar_weekday_cos"] = np.cos(weekday_phase)
+    df["calendar_month_sin"] = np.sin(month_phase)
+    df["calendar_month_cos"] = np.cos(month_phase)
+    # 月初/月末の資金フロー・リバランスの影響を表す。暦日だけで決まり、未来価格は使わない。
+    df["calendar_month_start"] = (calendar_dates.dt.day <= 5).astype(float)
+    df["calendar_month_end"] = (
+        calendar_dates.dt.day > calendar_dates.dt.days_in_month - 5
+    ).astype(float)
     df["sma25_ratio"] = df["Close"] / df["sma25"] - 1
     df["sma75_ratio"] = df["Close"] / df["sma75"] - 1
     df["macd_diff"] = df["macd"] - df["macd_signal"]
@@ -1739,7 +1763,7 @@ def main():
             "model": model,
             "features": feature_columns,
             "sector_columns": sector_columns,
-            "feature_version": "candlestick_news_timeseries_v2",
+            "feature_version": "candlestick_news_calendar_v3",
             "score_calibration": calibration_values,
             "ml_buy_threshold": ml_buy_threshold,
             "sector_ml_buy_thresholds": sector_ml_buy_thresholds,
@@ -1774,6 +1798,7 @@ def main():
                 "max_daily_ml_buy_candidates": MAX_DAILY_ML_BUY_CANDIDATES,
                 "market_data_alignment": "us_fx_next_jp_business_day",
                 "news_feature_columns": NEWS_FEATURE_COLUMNS,
+                "calendar_feature_columns": CALENDAR_FEATURE_COLUMNS,
             },
             "optuna_best_params": best,
             "optuna_best_value": study.best_value,
