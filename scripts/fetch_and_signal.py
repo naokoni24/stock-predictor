@@ -94,6 +94,7 @@ def predict_ml(model_bundle, hist, nikkei, sector=None, feature_df=None, news_se
         build_features,
         ensemble_disagreement,
         ml_buy_block_reasons,
+        regime_adjusted_base_threshold,
         sector_base_threshold,
     )
 
@@ -133,7 +134,11 @@ def predict_ml(model_bundle, hist, nikkei, sector=None, feature_df=None, news_se
         sector,
     )
     threshold = adjusted_ml_buy_threshold(
-        base_threshold,
+        regime_adjusted_base_threshold(
+            base_threshold,
+            row,
+            model_bundle.get("market_regime_thresholds", {}).get("offsets", {}),
+        ),
         row,
     )
     block_reasons = ml_buy_block_reasons(row)
@@ -251,18 +256,20 @@ def calc_adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14
 
 
 # 決算前後N日は誤シグナルを避けるためML買いをブロックする
-EARNINGS_BLOCK_DAYS_BEFORE = 3
-EARNINGS_BLOCK_DAYS_AFTER = 1
+EARNINGS_BLOCK_DAYS_BEFORE = 5
+EARNINGS_BLOCK_DAYS_AFTER = 2
 
 
-def get_next_earnings_date(ticker: str):
-    """次回決算日を返す。取得できない場合はNone"""
+def get_next_earnings_date(ticker: str, as_of_date=None):
+    """決算ブロック期間に入った直近/次回の決算日を返す。取得できない場合はNone。"""
     try:
         dates = yf.Ticker(ticker).earnings_dates
         if dates is None or dates.empty:
             return None
-        today = datetime.now(timezone.utc).date()
-        future = [d.date() for d in dates.index if d.date() >= today]
+        as_of_date = as_of_date or datetime.now(timezone.utc).date()
+        # 決算直後もEARNINGS_BLOCK_DAYS_AFTER日間は見送るため、過去側の猶予も検索する。
+        earliest_relevant = as_of_date - timedelta(days=EARNINGS_BLOCK_DAYS_AFTER)
+        future = [d.date() for d in dates.index if d.date() >= earliest_relevant]
         return min(future) if future else None
     except Exception:
         return None
@@ -598,10 +605,9 @@ def main():
 
         # 決算前後フィルター: 買い候補のみ決算日を確認してブロック
         if ml_signal == "buy_candidate":
-            earnings_date = get_next_earnings_date(ticker)
+            earnings_date = get_next_earnings_date(ticker, as_of_date=market_date)
             if earnings_date:
-                today_jst = datetime.now(timezone(timedelta(hours=9))).date()
-                days_to_earnings = (earnings_date - today_jst).days
+                days_to_earnings = (earnings_date - market_date).days
                 if -EARNINGS_BLOCK_DAYS_AFTER <= days_to_earnings <= EARNINGS_BLOCK_DAYS_BEFORE:
                     print(f"ML buy blocked: 決算前後 {earnings_date} (D{days_to_earnings:+d}) {ticker}")
                     ml_signal = "hold"

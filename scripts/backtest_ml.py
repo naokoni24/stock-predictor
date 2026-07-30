@@ -31,8 +31,10 @@ from train_model import (
     load_news_feature_frames,
     optimize_ml_buy_threshold,
     optimize_ensemble_disagreement,
+    optimize_market_regime_threshold_offsets,
     optimize_sector_thresholds,
     sector_base_threshold,
+    regime_adjusted_base_threshold,
     FEATURE_COLUMNS,
     HORIZON_DAYS,
     LABEL_LOOKAHEAD_DAYS,
@@ -199,6 +201,7 @@ def simulate_ml(
     tp_pct: float | None = None,
     atr_mult: float | None = None,
     max_ensemble_disagreement: float | None = None,
+    market_regime_threshold_offsets: dict[str, float] | None = None,
 ) -> list[float]:
     """MLモデル: 上昇確率がthreshold以上で翌日始値で購入 -> 損切り/利確/時間決済で売却
 
@@ -225,7 +228,12 @@ def simulate_ml(
     base_threshold = sector_base_threshold(threshold, sector_thresholds, sector)
     while i < n - 1 - hold_days:
         score = df.iloc[i]["ml_score"]
-        effective_threshold = adjusted_ml_buy_threshold(base_threshold, df.iloc[i])
+        effective_threshold = adjusted_ml_buy_threshold(
+            regime_adjusted_base_threshold(
+                base_threshold, df.iloc[i], market_regime_threshold_offsets
+            ),
+            df.iloc[i],
+        )
         disagreement_ok = (
             max_ensemble_disagreement is None
             or (
@@ -321,6 +329,7 @@ def selected_walk_forward_returns(
     sector_thresholds: dict[str, float] | None = None,
     require_rule_buy: bool = False,
     max_ensemble_disagreement: float | None = None,
+    market_regime_threshold_offsets: dict[str, float] | None = None,
 ) -> list[float]:
     """評価月で買い判定になった行の翌営業日始値約定ベース実現リターン(%)を返す"""
     returns = []
@@ -330,7 +339,12 @@ def selected_walk_forward_returns(
         sector = str(row.get("sector_label", "不明"))
         feature_row = row[feature_columns]
         base_threshold = sector_base_threshold(threshold, sector_thresholds, sector)
-        effective_threshold = adjusted_ml_buy_threshold(base_threshold, feature_row)
+        effective_threshold = adjusted_ml_buy_threshold(
+            regime_adjusted_base_threshold(
+                base_threshold, feature_row, market_regime_threshold_offsets
+            ),
+            feature_row,
+        )
         if (
             pd.isna(score)
             or score < effective_threshold
@@ -418,6 +432,16 @@ def run_walk_forward_evaluation(dataset: pd.DataFrame, sector_columns: list[str]
             val_df["sector_label"],
             dates=val_df["date"],
         )
+        market_regime_threshold_offsets, _ = optimize_market_regime_threshold_offsets(
+            threshold,
+            val_scores,
+            val_df["future_excess_return"].to_numpy(),
+            val_df[feature_columns],
+            val_df["sector_label"],
+            sector_thresholds,
+            val_df["date"],
+            MAX_DAILY_ML_BUY_CANDIDATES,
+        )
         val_disagreements = ensemble_disagreement(model, val_df[feature_columns])
         max_ensemble_disagreement, _ = optimize_ensemble_disagreement(
             val_scores,
@@ -429,6 +453,7 @@ def run_walk_forward_evaluation(dataset: pd.DataFrame, sector_columns: list[str]
             sector_thresholds,
             val_df["date"],
             MAX_DAILY_ML_BUY_CANDIDATES,
+            market_regime_threshold_offsets,
         )
 
         test_raw_proba = model.predict_proba(test_df[feature_columns])[:, 1]
@@ -441,6 +466,7 @@ def run_walk_forward_evaluation(dataset: pd.DataFrame, sector_columns: list[str]
             test_df[feature_columns],
             test_df["sector_label"],
             sector_thresholds,
+            market_regime_threshold_offsets,
             dates=test_df["date"],
             max_daily_candidates=MAX_DAILY_ML_BUY_CANDIDATES,
             disagreements=test_disagreements,
@@ -455,6 +481,7 @@ def run_walk_forward_evaluation(dataset: pd.DataFrame, sector_columns: list[str]
             threshold,
             sector_thresholds,
             max_ensemble_disagreement=max_ensemble_disagreement,
+            market_regime_threshold_offsets=market_regime_threshold_offsets,
         )
         fold_consensus_returns = selected_walk_forward_returns(
             test_scores,
@@ -465,6 +492,7 @@ def run_walk_forward_evaluation(dataset: pd.DataFrame, sector_columns: list[str]
             sector_thresholds,
             require_rule_buy=True,
             max_ensemble_disagreement=max_ensemble_disagreement,
+            market_regime_threshold_offsets=market_regime_threshold_offsets,
         )
         ml_returns.extend(fold_ml_returns)
         consensus_returns.extend(fold_consensus_returns)
@@ -519,6 +547,7 @@ def evaluate_with_risk(returns: list[float]) -> dict:
 def run_ml_risk_config(
     histories, model, features, nikkei, jp_sectors, feature_frames,
     ml_buy_threshold, sector_columns, score_calibration, sector_thresholds, max_ensemble_disagreement,
+    market_regime_threshold_offsets,
     **exit_kwargs,
 ) -> dict:
     """指定した損切り/利確設定でテスト期間のMLトレードを集計する"""
@@ -539,6 +568,7 @@ def run_ml_risk_config(
                 score_calibration=score_calibration,
                 sector_thresholds=sector_thresholds,
                 max_ensemble_disagreement=max_ensemble_disagreement,
+                market_regime_threshold_offsets=market_regime_threshold_offsets,
                 start_idx=start_idx,
                 **exit_kwargs,
             )
@@ -559,6 +589,7 @@ def main():
     ml_buy_threshold = float(bundle.get("ml_buy_threshold", DEFAULT_ML_BUY_THRESHOLD))
     sector_thresholds = bundle.get("sector_ml_buy_thresholds", {})
     max_ensemble_disagreement = bundle.get("ensemble_disagreement", {}).get("max")
+    market_regime_threshold_offsets = bundle.get("market_regime_thresholds", {}).get("offsets", {})
     jp_sectors = get_jp_sector_map()
     history_dates = [pd.to_datetime(hist["Date"]) for hist in histories.values()]
     news_feature_frames = load_news_feature_frames(
@@ -600,6 +631,7 @@ def main():
                 score_calibration=score_calibration,
                 sector_thresholds=sector_thresholds,
                 max_ensemble_disagreement=max_ensemble_disagreement,
+                market_regime_threshold_offsets=market_regime_threshold_offsets,
                 start_idx=start_idx,
             )
         )
@@ -617,6 +649,7 @@ def main():
                 score_calibration=score_calibration,
                 sector_thresholds=sector_thresholds,
                 max_ensemble_disagreement=max_ensemble_disagreement,
+                market_regime_threshold_offsets=market_regime_threshold_offsets,
                 start_idx=start_idx,
             )
         )
@@ -649,6 +682,7 @@ def main():
                     feature_df=feature_frames.get(ticker),
                     score_calibration=score_calibration,
                     max_ensemble_disagreement=max_ensemble_disagreement,
+                    market_regime_threshold_offsets=market_regime_threshold_offsets,
                     start_idx=start_idx,
                 )
             )
@@ -676,7 +710,7 @@ def main():
         r = run_ml_risk_config(
             histories, model, features, nikkei, jp_sectors, feature_frames,
             ml_buy_threshold, sector_columns, score_calibration, sector_thresholds,
-            max_ensemble_disagreement, **kw,
+            max_ensemble_disagreement, market_regime_threshold_offsets, **kw,
         )
         print(
             f"{label:<24} {r['trades']:>7} {r['win_rate']:>5.1f}% {r['avg_return']:>6.2f}% "

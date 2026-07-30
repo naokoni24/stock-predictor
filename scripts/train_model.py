@@ -93,6 +93,8 @@ MIN_ADJUSTED_ML_BUY_THRESHOLD = 0.50
 MAX_ADJUSTED_ML_BUY_THRESHOLD = 0.80
 MIN_SECTOR_THRESHOLD_ROWS = 120
 MIN_SECTOR_THRESHOLD_TRADES = 10
+MARKET_REGIME_MIN_ROWS = 300
+MARKET_REGIME_MIN_TRADES = 20
 
 # 月次再学習の自動昇格条件。候補モデルは、直近の未使用テスト期間で既存モデルより
 # 目的関数をこの値以上改善し、勝率を大きく落とさず、十分な取引数がある場合だけ本番化する。
@@ -476,6 +478,33 @@ def market_regime_adjustment(row: pd.Series) -> float:
     return adjustment
 
 
+def classify_market_regime(row: pd.Series) -> str:
+    """当日までに確定した指数だけで市場局面を4分類する。"""
+    nikkei_20d = _feature_value(row, "nikkei_return_20d")
+    topix_20d = _feature_value(row, "topix_return_20d")
+    vix_5d = _feature_value(row, "vix_return_5d")
+    vix_20d = _feature_value(row, "vix_return_20d")
+    if vix_5d > 0.12 or vix_20d > 0.25:
+        return "high_volatility"
+    if nikkei_20d < -0.05 and topix_20d < -0.05:
+        return "bear"
+    if nikkei_20d > 0.04 and topix_20d > 0.04:
+        return "bull"
+    return "neutral"
+
+
+def regime_adjusted_base_threshold(
+    base_threshold: float,
+    row: pd.Series,
+    market_regime_threshold_offsets: dict[str, float] | None = None,
+) -> float:
+    """検証期間で採用した局面別の上乗せ幅を共通/業種しきい値へ適用する。"""
+    offset = 0.0
+    if market_regime_threshold_offsets:
+        offset = float(market_regime_threshold_offsets.get(classify_market_regime(row), 0.0))
+    return float(base_threshold + offset)
+
+
 def sector_base_threshold(
     base_threshold: float,
     sector_thresholds: dict[str, float] | None = None,
@@ -552,6 +581,7 @@ def evaluate_threshold(
     feature_rows: pd.DataFrame | None = None,
     sectors: pd.Series | None = None,
     sector_thresholds: dict[str, float] | None = None,
+    market_regime_threshold_offsets: dict[str, float] | None = None,
     dates=None,
     max_daily_candidates: int = 0,
     disagreements=None,
@@ -569,10 +599,14 @@ def evaluate_threshold(
         sector_values = sectors.reindex(feature_rows.index) if sectors is not None else None
         thresholds = [
             adjusted_ml_buy_threshold(
-                sector_base_threshold(
-                    threshold,
-                    sector_thresholds,
-                    None if sector_values is None else str(sector_values.loc[index]),
+                regime_adjusted_base_threshold(
+                    sector_base_threshold(
+                        threshold,
+                        sector_thresholds,
+                        None if sector_values is None else str(sector_values.loc[index]),
+                    ),
+                    row,
+                    market_regime_threshold_offsets,
                 ),
                 row,
             )
@@ -697,6 +731,7 @@ def evaluate_model_bundle(
         bundle.get("training_config", {}).get("max_daily_ml_buy_candidates", 0) or 0
     )
     max_ensemble_disagreement = bundle.get("ensemble_disagreement", {}).get("max")
+    market_regime_threshold_offsets = bundle.get("market_regime_thresholds", {}).get("offsets", {})
     disagreements = (
         ensemble_disagreement(bundle["model"], evaluation_df[features])
         if max_ensemble_disagreement is not None
@@ -709,6 +744,7 @@ def evaluate_model_bundle(
         evaluation_df,
         evaluation_df["sector_label"],
         bundle.get("sector_ml_buy_thresholds", {}),
+        market_regime_threshold_offsets,
         dates=evaluation_df["date"],
         max_daily_candidates=max_daily_candidates,
         disagreements=disagreements,
@@ -923,6 +959,51 @@ def optimize_sector_thresholds(
     return sector_thresholds, sector_results
 
 
+def optimize_market_regime_threshold_offsets(
+    base_threshold: float,
+    scores,
+    future_returns,
+    feature_rows: pd.DataFrame,
+    sectors: pd.Series,
+    sector_thresholds: dict[str, float],
+    dates,
+    max_daily_candidates: int,
+) -> tuple[dict[str, float], dict[str, dict]]:
+    """検証期間で十分な件数がある市場局面だけ、しきい値の上乗せ幅を採用する。"""
+    regimes = feature_rows.apply(classify_market_regime, axis=1)
+    offsets: dict[str, float] = {}
+    results: dict[str, dict] = {}
+    for regime, index in regimes.groupby(regimes).groups.items():
+        if len(index) < MARKET_REGIME_MIN_ROWS:
+            continue
+        rows = feature_rows.loc[index]
+        regime_scores = pd.Series(scores, index=feature_rows.index).loc[index].to_numpy()
+        regime_returns = pd.Series(future_returns, index=feature_rows.index).loc[index].to_numpy()
+        regime_sectors = sectors.loc[index]
+        regime_dates = pd.Series(dates, index=feature_rows.index).loc[index]
+        baseline = evaluate_threshold(
+            regime_scores, regime_returns, base_threshold, rows, regime_sectors,
+            sector_thresholds, dates=regime_dates, max_daily_candidates=max_daily_candidates,
+        )
+        candidates = []
+        for threshold in THRESHOLD_GRID:
+            result = evaluate_threshold(
+                regime_scores, regime_returns, threshold, rows, regime_sectors,
+                sector_thresholds, dates=regime_dates, max_daily_candidates=max_daily_candidates,
+            )
+            result["threshold"] = threshold
+            candidates.append(result)
+        valid = [result for result in candidates if result["trades"] >= MARKET_REGIME_MIN_TRADES]
+        if not valid or baseline["trades"] < MARKET_REGIME_MIN_TRADES:
+            continue
+        best = max(valid, key=lambda result: (result["objective"], result["avg_return"], result["trades"]))
+        # 検証期間内の僅差で局面別設定を増やさない。目的関数+0.05%/取引以上の改善が必要。
+        if best["objective"] >= baseline["objective"] + 0.0005 and best["threshold"] != base_threshold:
+            offsets[str(regime)] = float(best["threshold"] - base_threshold)
+            results[str(regime)] = {"rows": int(len(rows)), "baseline": baseline, "best": best}
+    return offsets, results
+
+
 def optimize_ensemble_disagreement(
     scores,
     disagreements,
@@ -933,6 +1014,7 @@ def optimize_ensemble_disagreement(
     sector_thresholds: dict[str, float],
     dates,
     max_daily_candidates: int,
+    market_regime_threshold_offsets: dict[str, float] | None = None,
 ) -> tuple[float | None, list[dict]]:
     """検証期間だけでアンサンブル不一致の上限を選ぶ。
 
@@ -949,6 +1031,7 @@ def optimize_ensemble_disagreement(
             feature_rows,
             sectors,
             sector_thresholds,
+            market_regime_threshold_offsets,
             dates=dates,
             max_daily_candidates=max_daily_candidates,
             disagreements=disagreements if limit is not None else None,
@@ -1695,6 +1778,16 @@ def main():
         val_df["sector_label"],
         dates=val_df["date"],
     )
+    market_regime_threshold_offsets, market_regime_threshold_results = optimize_market_regime_threshold_offsets(
+        ml_buy_threshold,
+        val_scores,
+        val_df["future_excess_return"].to_numpy(),
+        val_df,
+        val_df["sector_label"],
+        sector_ml_buy_thresholds,
+        val_df["date"],
+        MAX_DAILY_ML_BUY_CANDIDATES,
+    )
     val_disagreements = ensemble_disagreement(model, val_df[feature_columns])
     max_ensemble_disagreement, disagreement_results = optimize_ensemble_disagreement(
         val_scores,
@@ -1706,6 +1799,7 @@ def main():
         sector_ml_buy_thresholds,
         val_df["date"],
         MAX_DAILY_ML_BUY_CANDIDATES,
+        market_regime_threshold_offsets,
     )
 
     # テストデータ(完全に未使用のデータ)でしきい値の最終評価を行う
@@ -1719,6 +1813,7 @@ def main():
         test_df,
         test_df["sector_label"],
         sector_ml_buy_thresholds,
+        market_regime_threshold_offsets,
         dates=test_df["date"],
         max_daily_candidates=MAX_DAILY_ML_BUY_CANDIDATES,
         disagreements=test_disagreements,
@@ -1778,6 +1873,12 @@ def main():
             print(f"  {sector}: {threshold:.2f}")
     else:
         print("採用する業種別ML買いしきい値: なし(全業種で共通しきい値を使用)")
+    if market_regime_threshold_offsets:
+        print("採用する市場局面別しきい値上乗せ:")
+        for regime, offset in sorted(market_regime_threshold_offsets.items()):
+            print(f"  {regime}: {offset:+.2f}")
+    else:
+        print("採用する市場局面別しきい値上乗せ: なし(共通しきい値を使用)")
 
     candidate_bundle = {
             "model": model,
@@ -1789,6 +1890,12 @@ def main():
             "sector_ml_buy_thresholds": sector_ml_buy_thresholds,
             "threshold_results": threshold_results,
             "sector_threshold_results": sector_threshold_results,
+            "market_regime_thresholds": {
+                "offsets": market_regime_threshold_offsets,
+                "results": market_regime_threshold_results,
+                "min_rows": MARKET_REGIME_MIN_ROWS,
+                "min_trades": MARKET_REGIME_MIN_TRADES,
+            },
             "ensemble_disagreement": {
                 "max": max_ensemble_disagreement,
                 "grid": ENSEMBLE_DISAGREEMENT_GRID,
