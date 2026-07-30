@@ -45,6 +45,10 @@ EXCESS_RETURN_TARGET = 0.005
 MIN_SECTOR_BENCHMARK_MEMBERS = 3
 MAX_DAILY_ML_BUY_CANDIDATES = 10
 
+# 日本株の売買候補・学習対象に必要な20日平均売買代金(円)。
+# 1億円未満は少額注文でも価格影響やスプレッドが大きくなりやすいため除外する。
+MIN_AVG_DAILY_TRADED_VALUE = 100_000_000
+
 # 推奨損切り幅(現在値からの下落率)。フロント(ホーム/保有株画面)の推奨損切り表示と同じ値。
 # ラベル作成時、実運用ルール(利確なし・この幅で損切り・HORIZON_DAYS日で時間決済)に合わせる。
 STOP_LOSS_PCT = 0.08
@@ -193,6 +197,8 @@ BASE_FEATURE_COLUMNS = [
     "return_5d",
     "return_20d",
     "volume_ratio",
+    "avg_daily_traded_value_20d",
+    "traded_value_ratio",
     "volume_price_momentum_5d",
     "volume_price_momentum_20d",
     "volume_up_pressure_5d",
@@ -511,6 +517,7 @@ def ml_buy_block_reasons(row: pd.Series) -> list[str]:
     range_expansion_20d = _feature_value(row, "range_expansion_20d", 1.0)
     intraday_return = _feature_value(row, "intraday_return")
     max_drawdown_20d = _feature_value(row, "max_drawdown_20d")
+    avg_daily_traded_value = _feature_value(row, "avg_daily_traded_value_20d")
 
     if return_5d > 0.03 and volume_ratio < 0.60:
         reasons.append("薄商いの上昇")
@@ -522,6 +529,8 @@ def ml_buy_block_reasons(row: pd.Series) -> list[str]:
         reasons.append("下落方向の値幅拡大")
     if return_5d < -0.08 or max_drawdown_20d < -0.18:
         reasons.append("短期下落が深い")
+    if avg_daily_traded_value < MIN_AVG_DAILY_TRADED_VALUE:
+        reasons.append("平均売買代金が不足")
 
     return reasons
 
@@ -529,6 +538,11 @@ def ml_buy_block_reasons(row: pd.Series) -> list[str]:
 def is_ml_buy_blocked(row: pd.Series) -> bool:
     """買わないフィルターに該当するか"""
     return bool(ml_buy_block_reasons(row))
+
+
+def has_sufficient_liquidity(row: pd.Series) -> bool:
+    """学習・日次推論・検証で共有する最低流動性条件。"""
+    return _feature_value(row, "avg_daily_traded_value_20d") >= MIN_AVG_DAILY_TRADED_VALUE
 
 
 def evaluate_threshold(
@@ -1157,6 +1171,10 @@ def build_features(
     # 出来高比率(直近出来高 / 過去20日平均出来高)
     df["volume_ratio"] = df["Volume"] / df["Volume"].rolling(20).mean()
     df["volume_ratio_5d"] = df["Volume"] / df["Volume"].rolling(5).mean()
+    # 売買代金は株価水準が違う銘柄間でも流動性を比較できる。平均は当日までで計算する。
+    df["traded_value"] = df["Close"] * df["Volume"]
+    df["avg_daily_traded_value_20d"] = df["traded_value"].rolling(20).mean()
+    df["traded_value_ratio"] = df["traded_value"] / df["avg_daily_traded_value_20d"]
 
     # 出来高を伴う上昇/下落の勢い。値動きだけでなく、市場参加者の厚みも見る。
     df["volume_price_momentum_5d"] = df["return_5d"] * df["volume_ratio_5d"]
@@ -1455,12 +1473,14 @@ def build_dataset() -> pd.DataFrame:
 
         # 特徴量・ラベルが揃っている行のみ使用(末尾は翌日約定+時間決済の未来データがないため除外)
         df = df.dropna(subset=FEATURE_COLUMNS + ["future_return", "future_excess_return", "label"])
+        before_liquidity_filter = len(df)
+        df = df[df.apply(has_sufficient_liquidity, axis=1)]
         df["label"] = df["label"].astype(int)
 
         df = df[["date"] + FEATURE_COLUMNS + ["future_return", "benchmark_return", "future_excess_return", "label"]].copy()
         df["sector"] = sectors.get(ticker, "不明")
         rows.append(df)
-        print(f"{ticker}: {len(df)} rows")
+        print(f"{ticker}: {len(df)} rows (liquidity excluded {before_liquidity_filter - len(df)})")
 
     dataset = pd.concat(rows, ignore_index=True)
     dataset["sector_label"] = dataset["sector"]
@@ -1763,7 +1783,7 @@ def main():
             "model": model,
             "features": feature_columns,
             "sector_columns": sector_columns,
-            "feature_version": "candlestick_news_calendar_v3",
+            "feature_version": "candlestick_news_calendar_liquidity_v4",
             "score_calibration": calibration_values,
             "ml_buy_threshold": ml_buy_threshold,
             "sector_ml_buy_thresholds": sector_ml_buy_thresholds,
@@ -1799,6 +1819,7 @@ def main():
                 "market_data_alignment": "us_fx_next_jp_business_day",
                 "news_feature_columns": NEWS_FEATURE_COLUMNS,
                 "calendar_feature_columns": CALENDAR_FEATURE_COLUMNS,
+                "min_avg_daily_traded_value": MIN_AVG_DAILY_TRADED_VALUE,
             },
             "optuna_best_params": best,
             "optuna_best_value": study.best_value,
