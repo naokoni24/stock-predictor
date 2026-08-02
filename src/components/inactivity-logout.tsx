@@ -10,7 +10,6 @@ const SESSION_LIMIT_MS = 12 * 60 * 60 * 1000; // ログインから最大12時�
 const LAST_ACTIVITY_KEY = "lastActivityAt";
 const SESSION_STARTED_KEY = "sessionStartedAt";
 const SESSION_MARKER_KEY = "sessionMarker";
-const BROWSER_SESSION_KEY = "authBrowserSession";
 const CHECK_INTERVAL_MS = 60 * 1000; // 1分ごとにチェック
 
 const ACTIVITY_EVENTS = ["mousemove", "mousedown", "keydown", "scroll", "touchstart"] as const;
@@ -25,7 +24,6 @@ export function InactivityLogout() {
       localStorage.removeItem(LAST_ACTIVITY_KEY);
       localStorage.removeItem(SESSION_STARTED_KEY);
       localStorage.removeItem(SESSION_MARKER_KEY);
-      sessionStorage.removeItem(BROWSER_SESSION_KEY);
     };
 
     const signOutForTimeout = async () => {
@@ -96,10 +94,8 @@ export function InactivityLogout() {
       });
     };
 
-    // sessionStorage に印がない場合は、ブラウザ再起動後に残ったCookieによる
-    // 自動ログインとみなし、getSession を待たず即座にログアウトする。
-    // あわせて期限切れ時も即座にログアウトし、旧画面を表示しない。
-    if (sessionStorage.getItem(BROWSER_SESSION_KEY) !== "active" || isExpired()) {
+    // 期限切れなら getSession を待たず即座にログアウトする(黒画面の時間を最短化)。
+    if (isExpired()) {
       void signOutForTimeout();
       return;
     }
