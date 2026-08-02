@@ -1557,7 +1557,10 @@ def build_dataset() -> pd.DataFrame:
         # 特徴量・ラベルが揃っている行のみ使用(末尾は翌日約定+時間決済の未来データがないため除外)
         df = df.dropna(subset=FEATURE_COLUMNS + ["future_return", "future_excess_return", "label"])
         before_liquidity_filter = len(df)
-        df = df[df.apply(has_sufficient_liquidity, axis=1)]
+        # dfが既に0行だとapply(axis=1)がSeriesではなく空DataFrameを返し、
+        # 後続の列選択でKeyErrorになる(pandasの既知の挙動)。空なら素通りする。
+        if not df.empty:
+            df = df[df.apply(has_sufficient_liquidity, axis=1)]
         df["label"] = df["label"].astype(int)
 
         df = df[["date"] + FEATURE_COLUMNS + ["future_return", "benchmark_return", "future_excess_return", "label"]].copy()
