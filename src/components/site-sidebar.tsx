@@ -16,7 +16,7 @@ export function SiteSidebar() {
   const pathname = usePathname();
 
   return (
-    <aside className="hidden md:flex md:w-60 md:flex-col md:border-r md:border-border md:py-6 md:px-4 md:gap-1">
+    <aside className="hidden md:sticky md:top-0 md:flex md:h-svh md:w-60 md:shrink-0 md:flex-col md:overflow-y-auto md:border-r md:border-border md:py-6 md:px-4 md:gap-1">
       <div className="flex items-center gap-2 px-2 pb-6">
         <div className="flex size-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">
           <LineChart className="size-4" />
