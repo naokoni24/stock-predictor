@@ -14,23 +14,26 @@ export default function HoldingsForm({ error, collapsedByDefault }: { error?: st
   const [open, setOpen] = useState(!collapsedByDefault);
 
   return (
-    <Card className="border-primary/40 shadow-sm">
+    <Card className="border-2 border-primary shadow-md py-0 gap-0 overflow-hidden">
       <CardHeader
-        className={cn("bg-primary/5 rounded-t-xl", collapsedByDefault && "cursor-pointer")}
+        className={cn(
+          "bg-primary text-primary-foreground py-4",
+          collapsedByDefault && "cursor-pointer"
+        )}
         onClick={collapsedByDefault ? () => setOpen((v) => !v) : undefined}
       >
-        <CardTitle className="text-base flex items-center justify-between gap-2">
-          <span className="flex items-center gap-2 text-primary">
-            <PlusCircle className="size-4" />
+        <CardTitle className="text-lg flex items-center justify-between gap-2">
+          <span className="flex items-center gap-2.5">
+            <PlusCircle className="size-6" />
             保有株を追加
           </span>
           {collapsedByDefault && (
-            <ChevronDown className={cn("size-4 text-muted-foreground transition-transform", open && "rotate-180")} />
+            <ChevronDown className={cn("size-5 transition-transform", open && "rotate-180")} />
           )}
         </CardTitle>
       </CardHeader>
       {open && (
-      <CardContent>
+      <CardContent className="pt-4 pb-4">
         <form
           action={addHolding}
           onSubmit={(e) => {
