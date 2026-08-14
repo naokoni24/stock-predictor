@@ -36,8 +36,10 @@ export async function addHolding(formData: FormData) {
     redirectWithError("ログインが必要です。");
   }
 
-  // 銘柄マスタに存在しない場合のみ追加を試みる
-  // RLSポリシー未設定環境ではinsertが拒否されるが、既存銘柄ならholdings追加は継続できる
+  // 銘柄マスタに存在しない場合のみ追加を試みる。
+  // holdings.ticker は stocks(ticker) への外部キーのため、ここでの登録に
+  // 失敗すると直後のholdings insertが必ず失敗する(FK違反)。RLS未設定などで
+  // 挿入が拒否された場合は、分かりにくいFKエラーではなくここで案内する。
   const { data: existingStock } = await supabase
     .from("stocks")
     .select("ticker")
@@ -49,8 +51,12 @@ export async function addHolding(formData: FormData) {
       .from("stocks")
       .insert({ ticker, name: name || ticker });
 
-    if (stockError && stockError.code !== "42501") {
-      // 42501 = RLS violation: 日次バッチ未取得の銘柄はholdings登録をブロックせず続行
+    if (stockError) {
+      if (stockError.code === "42501") {
+        redirectWithError(
+          "この銘柄はまだ日次更新の対象になっていないため追加できません。翌営業日の更新後に再度お試しください。"
+        );
+      }
       redirectWithError(stockError.message);
     }
   }
