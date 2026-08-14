@@ -34,6 +34,12 @@ export default function HoldingsForm({ error, collapsedByDefault }: { error?: st
         <form
           action={addHolding}
           onSubmit={(e) => {
+            const formData = new FormData(e.currentTarget);
+            if (!String(formData.get("ticker") ?? "").trim()) {
+              e.preventDefault();
+              alert("銘柄候補の一覧から銘柄を選択してください。");
+              return;
+            }
             if (!confirm("この内容で保有株を追加しますか？")) {
               e.preventDefault();
             }

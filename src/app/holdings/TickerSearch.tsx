@@ -45,6 +45,19 @@ export default function TickerSearch() {
 
   const visibleOptions = selected || query.trim().length < 1 ? [] : options;
 
+  // 候補をクリックせずEnterで送信すると、ticker未選択のまま
+  // フォームが送信され「ティッカーを入力してください」の紛らわしいエラーになるため、
+  // Enterは常にフォーム送信を止め、候補があれば先頭候補を選択したことにする。
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    if (!selected && visibleOptions.length > 0) {
+      setSelected(visibleOptions[0]);
+      setOptions([]);
+      setOpen(false);
+    }
+  };
+
   return (
     <div ref={containerRef} className="flex flex-col gap-1.5 relative">
       <Label htmlFor="stock-search">銘柄名で検索</Label>
@@ -59,11 +72,17 @@ export default function TickerSearch() {
             setOpen(true);
           }}
           onFocus={() => setOpen(true)}
+          onKeyDown={handleKeyDown}
           placeholder="例: トヨタ"
           className="pl-8"
           autoComplete="off"
         />
       </div>
+      {!selected && (
+        <p className="text-xs text-muted-foreground">
+          候補一覧から銘柄をクリックして選択してください
+        </p>
+      )}
 
       {open && visibleOptions.length > 0 && (
         <div className="absolute top-full left-0 right-0 mt-1 z-10 rounded-lg border border-border bg-popover shadow-md max-h-56 overflow-y-auto">
