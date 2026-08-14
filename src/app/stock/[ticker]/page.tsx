@@ -84,8 +84,12 @@ export default async function StockDetail({
     return total > 0 ? { rate: (wins / total) * 100, total } : null;
   })();
 
-  const latest = prices?.[prices.length - 1];
-  const prev = prices?.[prices.length - 2];
+  // yfinanceが当日終値をまだ確定配信していない日はcloseがnullで保存されるため、
+  // ヘッダーの現在値・前日比には直近の有効な終値を使う(latest.close?.toLocaleString()
+  // だとnullでクラッシュしていた不具合の修正を兼ねる)。
+  const pricesWithClose = (prices ?? []).filter((p) => p.close != null);
+  const latest = pricesWithClose[pricesWithClose.length - 1];
+  const prev = pricesWithClose[pricesWithClose.length - 2];
   const changePct =
     latest && prev && prev.close ? ((latest.close - prev.close) / prev.close) * 100 : null;
 
