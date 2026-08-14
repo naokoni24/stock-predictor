@@ -619,7 +619,7 @@ def main():
             {
                 "ticker": ticker,
                 "date": market_date.isoformat(),
-                "close": float(latest["Close"]),
+                "close": None if pd.isna(latest["Close"]) else float(latest["Close"]),
                 "sma25": None if pd.isna(latest["sma25"]) else float(latest["sma25"]),
                 "sma75": None if pd.isna(latest["sma75"]) else float(latest["sma75"]),
                 "rsi14": None if pd.isna(latest["rsi14"]) else float(latest["rsi14"]),
