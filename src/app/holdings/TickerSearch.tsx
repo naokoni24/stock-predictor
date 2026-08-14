@@ -147,7 +147,7 @@ export default function TickerSearch() {
             <button
               key={o.ticker}
               type="button"
-              className="flex w-full items-center justify-between gap-2 px-3 py-2 text-sm text-left hover:bg-accent"
+              className="flex w-full flex-col items-start gap-0.5 px-3 py-2 text-sm text-left hover:bg-accent"
               onClick={() => {
                 setSelected(o);
                 setOptions([]);
