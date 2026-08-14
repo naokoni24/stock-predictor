@@ -542,15 +542,18 @@ def main():
         hist["bb_upper"], hist["bb_lower"] = calc_bollinger(hist["Close"])
 
         # 価格履歴を保存
+        # yfinanceが一部日でNaNを返すことがあり(新規上場銘柄の取引低調日など)、
+        # そのままだとJSONシリアライズ(allow_nan=False)に失敗しバッチ全体が
+        # 落ちるため、NaNはNoneに変換して保存する(signals/fundamentalsと同じ対処)。
         price_rows = [
             {
                 "ticker": ticker,
                 "date": r["date"].isoformat(),
-                "open": float(r["Open"]),
-                "high": float(r["High"]),
-                "low": float(r["Low"]),
-                "close": float(r["Close"]),
-                "volume": int(r["Volume"]),
+                "open": None if pd.isna(r["Open"]) else float(r["Open"]),
+                "high": None if pd.isna(r["High"]) else float(r["High"]),
+                "low": None if pd.isna(r["Low"]) else float(r["Low"]),
+                "close": None if pd.isna(r["Close"]) else float(r["Close"]),
+                "volume": None if pd.isna(r["Volume"]) else int(r["Volume"]),
             }
             for _, r in hist.tail(30).iterrows()
         ]
