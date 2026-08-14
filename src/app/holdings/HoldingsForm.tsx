@@ -60,6 +60,7 @@ export default function HoldingsForm({ error, collapsedByDefault }: { error?: st
                 type="number"
                 min="0.0001"
                 step="any"
+                defaultValue={100}
               />
             </div>
             <div className="flex flex-col gap-1.5">
