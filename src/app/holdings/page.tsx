@@ -55,13 +55,15 @@ export default async function HoldingsPage({
         .limit(signalFetchLimit)
     : { data: [] };
 
-  // 各銘柄の最新シグナルのみ残す
+  // 各銘柄の最新シグナルのみ残す。yfinanceが当日終値をまだ確定配信していない
+  // 日はcloseがnullで保存されるため、そのような行は使わず直近の有効な行を使う
+  // (評価額が取得額にフォールバックして損益が不自然に見える不具合の修正)。
   const latestByTicker = new Map<
     string,
     { close: number; date: string; signal: string | null; rsi14: number | null }
   >();
   for (const s of latestSignals ?? []) {
-    if (!latestByTicker.has(s.ticker)) {
+    if (!latestByTicker.has(s.ticker) && s.close != null) {
       latestByTicker.set(s.ticker, { close: s.close, date: s.date, signal: s.signal, rsi14: s.rsi14 });
     }
   }

@@ -41,10 +41,12 @@ async function fetchWatchlists() {
     .order("date", { ascending: false })
     .limit(800);
 
-  // 銘柄ごとに最新日のシグナルのみを残す(買い/売り候補どちらのタブでも同じ最新日を使う)
+  // 銘柄ごとに最新日のシグナルのみを残す(買い/売り候補どちらのタブでも同じ最新日を使う)。
+  // yfinanceが当日終値をまだ確定配信していない日はclose/signalがnullで保存されるため、
+  // そのような行はスキップして直近の有効な行を使う。
   const latestByTicker = new Map<string, NonNullable<typeof signals>[number]>();
   for (const s of signals ?? []) {
-    if (!latestByTicker.has(s.ticker)) {
+    if (!latestByTicker.has(s.ticker) && s.close != null) {
       latestByTicker.set(s.ticker, s);
     }
   }
