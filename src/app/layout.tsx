@@ -23,8 +23,19 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "AI Stock Signal | 株価予測ダッシュボード",
   description: "本日のおすすめ株と保有株の売り時をAIでチェック",
+  manifest: "/manifest.webmanifest",
   appleWebApp: {
+    // iOSでホーム画面に追加した際、Safariのアドレスバー・下部操作バー無しの
+    // スタンドアロン表示(PWA)にするために必須のメタタグ。
+    capable: true,
     title: "AI Stock Signal",
+    statusBarStyle: "black",
+  },
+  other: {
+    // appleWebApp.capable が生成するのは "mobile-web-app-capable"(apple-無し)
+    // のみで、iOSが長年参照してきた apple-mobile-web-app-capable は出力されない。
+    // 古いiOSでも確実にスタンドアロン表示させるため明示的に追加する。
+    "apple-mobile-web-app-capable": "yes",
   },
 };
 
@@ -32,6 +43,7 @@ export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
   maximumScale: 1,
+  themeColor: "#0a0a0a",
 };
 
 export default async function RootLayout({
