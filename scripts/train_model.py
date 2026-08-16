@@ -1069,6 +1069,10 @@ def optimize_ensemble_disagreement(
     return best["max_ensemble_disagreement"], results
 
 
+MAX_DAILY_CANDIDATES_STABILITY_SPLITS = 3
+MAX_DAILY_CANDIDATES_STABILITY_STD_PENALTY = 1.0
+
+
 def optimize_max_daily_candidates(
     scores,
     future_returns,
@@ -1085,10 +1089,23 @@ def optimize_max_daily_candidates(
 
     「上位10件」という件数は検証されていなかったため、しきい値・業種別・
     局面別・アンサンブル不一致など他の設定を固定した上でMAX_DAILY_CANDIDATES_GRID
-    から比較する。取引数が少なすぎる件数は評価が不安定として除外し、
-    候補が無ければ既定値(MAX_DAILY_ML_BUY_CANDIDATES)にフォールバックする。
+    から比較する。
+
+    件数を絞るほど1日あたりの採用数が減り取引数が少なくなって検証がブレやすい
+    ため、ml_buy_thresholdの最適化(add_stability_metrics)と同じ考え方で検証期間を
+    サブ期間に分割し、「平均objective − ばらつきペナルティ」が最大の件数を選ぶ
+    (単一期間限定の過適合を防ぐ)。安定な件数が1つも無い場合は従来通り
+    全期間objectiveで選ぶ。取引数が少なすぎる件数は除外し、候補が無ければ
+    既定値(MAX_DAILY_ML_BUY_CANDIDATES)にフォールバックする。
     """
+    scores = np.asarray(scores)
+    future_returns = np.asarray(future_returns)
+    date_values = np.asarray(pd.Series(dates).to_numpy())
+    unique_dates = np.array(sorted(pd.unique(date_values)))
     min_trades = max(30, int(len(scores) * 0.02))
+    can_check_stability = len(unique_dates) >= MAX_DAILY_CANDIDATES_STABILITY_SPLITS * 2
+    min_sub_trades = max(5, min_trades // (MAX_DAILY_CANDIDATES_STABILITY_SPLITS * 2))
+
     results = []
     for candidates in MAX_DAILY_CANDIDATES_GRID:
         result = evaluate_threshold(
@@ -1105,20 +1122,69 @@ def optimize_max_daily_candidates(
             max_ensemble_disagreement=max_ensemble_disagreement,
         )
         result["max_daily_candidates"] = candidates
+
+        if can_check_stability and result["trades"] >= min_trades:
+            sub_periods = []
+            for chunk in np.array_split(unique_dates, MAX_DAILY_CANDIDATES_STABILITY_SPLITS):
+                mask = np.isin(date_values, chunk)
+                sub_eval = evaluate_threshold(
+                    scores[mask],
+                    future_returns[mask],
+                    threshold,
+                    None if feature_rows is None else feature_rows.iloc[mask],
+                    None if sectors is None else sectors.iloc[mask],
+                    sector_thresholds,
+                    market_regime_threshold_offsets,
+                    dates=date_values[mask],
+                    max_daily_candidates=candidates,
+                    disagreements=None if disagreements is None else np.asarray(disagreements)[mask],
+                    max_ensemble_disagreement=max_ensemble_disagreement,
+                )
+                sub_periods.append(
+                    {
+                        "start": str(chunk[0]),
+                        "end": str(chunk[-1]),
+                        "trades": sub_eval["trades"],
+                        "avg_return": sub_eval["avg_return"],
+                        "objective": sub_eval["objective"],
+                    }
+                )
+            result["sub_periods"] = sub_periods
+            stable = all(s["trades"] >= min_sub_trades for s in sub_periods)
+            result["stable"] = stable
+            if stable:
+                objectives = np.array([s["objective"] for s in sub_periods])
+                result["stability_objective"] = float(
+                    objectives.mean() - MAX_DAILY_CANDIDATES_STABILITY_STD_PENALTY * objectives.std()
+                )
+
         results.append(result)
 
     valid = [result for result in results if result["trades"] >= min_trades]
     if not valid:
         return MAX_DAILY_ML_BUY_CANDIDATES, results
-    best = max(
-        valid,
-        key=lambda result: (
-            result["objective"],
-            result["avg_return"],
-            result["win_rate"],
-            result["trades"],
-        ),
-    )
+
+    stable_results = [result for result in valid if result.get("stability_objective") is not None]
+    if stable_results:
+        best = max(
+            stable_results,
+            key=lambda result: (
+                result["stability_objective"],
+                result["objective"],
+                result["avg_return"],
+                result["trades"],
+            ),
+        )
+    else:
+        best = max(
+            valid,
+            key=lambda result: (
+                result["objective"],
+                result["avg_return"],
+                result["win_rate"],
+                result["trades"],
+            ),
+        )
     return best["max_daily_candidates"], results
 
 
@@ -2021,7 +2087,9 @@ def main():
                 "selected": max_daily_ml_buy_candidates,
                 "grid": MAX_DAILY_CANDIDATES_GRID,
                 "results": daily_candidates_results,
-                "metric": "validation_net_excess_return_objective",
+                "stability_splits": MAX_DAILY_CANDIDATES_STABILITY_SPLITS,
+                "stability_std_penalty": MAX_DAILY_CANDIDATES_STABILITY_STD_PENALTY,
+                "metric": "stable_validation_net_excess_return_objective",
             },
             "threshold_optimization": {
                 "horizon_days": HORIZON_DAYS,
