@@ -128,6 +128,15 @@ PROMOTION_MAX_WIN_RATE_DECLINE = 0.02
 # ベースライン有無に関わらず必ずこの下限を満たすことを昇格の必須条件にする。
 PROMOTION_MIN_AVG_RETURN = 0.0
 
+# テスト期間全体の集計だけで昇格を決めると、一部の相場でだけ偶然プラスになった
+# モデルを誤って採用しかねない(2026-08、検証期間限定の過学習で候補がテスト期間
+# 悪化した事例と同種のリスクが、最終判定側にも残っていた)。テスト期間を
+# PROMOTION_TEST_SUB_PERIODS個のサブ期間に分け、「過半数の期間でプラス」
+# 「極端なマイナス期間なし」も昇格の必須条件にする。
+PROMOTION_TEST_SUB_PERIODS = 3
+PROMOTION_MIN_POSITIVE_PERIOD_RATIO = 0.5  # 過半数(3期間なら2/3以上)がプラスであること
+PROMOTION_MAX_NEGATIVE_PERIOD_RETURN = -0.01  # 1期間の平均が-1%を下回ったら極端なマイナスとみなす
+
 # 特徴量選択: 正規化gain重要度がこの割合未満の特徴量を除外する(過学習・ノイズ削減)。
 # 環境変数 SELECT_FEATURES=0 で無効化できる(A/B比較用)。
 MIN_FEATURE_IMPORTANCE = 0.001
@@ -863,7 +872,63 @@ def evaluate_model_bundle(
     return result, None
 
 
-def should_promote_candidate(candidate: dict, baseline: dict | None) -> tuple[bool, str]:
+def evaluate_test_period_stability(
+    scores,
+    future_returns,
+    threshold: float,
+    feature_rows: pd.DataFrame,
+    sectors: pd.Series,
+    sector_thresholds: dict[str, float],
+    market_regime_threshold_offsets: dict[str, float] | None,
+    dates,
+    max_daily_candidates: int,
+    disagreements=None,
+    max_ensemble_disagreement: float | None = None,
+) -> list[dict]:
+    """テスト期間をPROMOTION_TEST_SUB_PERIODS個のサブ期間に分け、それぞれの
+    trades/avg_return/objectiveを返す(should_promote_candidateの期間安定性
+    チェック用)。期間が短すぎて分割評価できない場合は空リストを返す。
+    """
+    scores = np.asarray(scores)
+    future_returns = np.asarray(future_returns)
+    date_values = np.asarray(pd.Series(dates).to_numpy())
+    unique_dates = np.array(sorted(pd.unique(date_values)))
+    if len(unique_dates) < PROMOTION_TEST_SUB_PERIODS:
+        return []
+
+    sub_periods = []
+    for chunk in np.array_split(unique_dates, PROMOTION_TEST_SUB_PERIODS):
+        mask = np.isin(date_values, chunk)
+        sub_eval = evaluate_threshold(
+            scores[mask],
+            future_returns[mask],
+            threshold,
+            None if feature_rows is None else feature_rows.iloc[mask],
+            None if sectors is None else sectors.iloc[mask],
+            sector_thresholds,
+            market_regime_threshold_offsets,
+            dates=date_values[mask],
+            max_daily_candidates=max_daily_candidates,
+            disagreements=None if disagreements is None else np.asarray(disagreements)[mask],
+            max_ensemble_disagreement=max_ensemble_disagreement,
+        )
+        sub_periods.append(
+            {
+                "start": str(chunk[0]),
+                "end": str(chunk[-1]),
+                "trades": sub_eval["trades"],
+                "avg_return": sub_eval["avg_return"],
+                "objective": sub_eval["objective"],
+            }
+        )
+    return sub_periods
+
+
+def should_promote_candidate(
+    candidate: dict,
+    baseline: dict | None,
+    candidate_test_sub_periods: list[dict] | None = None,
+) -> tuple[bool, str]:
     """再学習候補を本番モデルへ昇格させるかを決める。"""
     if candidate["avg_return"] < PROMOTION_MIN_AVG_RETURN:
         # ベースラインとの相対比較より先に絶対値を必ずチェックする。
@@ -872,9 +937,28 @@ def should_promote_candidate(candidate: dict, baseline: dict | None) -> tuple[bo
             "候補の絶対的な期待値が基準未満 "
             f"(avg_return={candidate['avg_return']:+.4f} < {PROMOTION_MIN_AVG_RETURN:+.4f})"
         )
+
+    if candidate_test_sub_periods:
+        # テスト期間全体の集計だけでは「一部の相場でだけ偶然プラス」なモデルを
+        # 見抜けないため、サブ期間ごとの成績でも必ずチェックする。
+        positive_count = sum(1 for p in candidate_test_sub_periods if p["avg_return"] > 0)
+        positive_ratio = positive_count / len(candidate_test_sub_periods)
+        if positive_ratio <= PROMOTION_MIN_POSITIVE_PERIOD_RATIO:
+            return False, (
+                "テスト期間の一部だけで偶然プラスになっている可能性 "
+                f"(プラスの期間 {positive_count}/{len(candidate_test_sub_periods)})"
+            )
+        worst_period_return = min(p["avg_return"] for p in candidate_test_sub_periods)
+        if worst_period_return < PROMOTION_MAX_NEGATIVE_PERIOD_RETURN:
+            return False, (
+                "テスト期間の一部に極端なマイナス期間がある "
+                f"(最悪期間avg_return={worst_period_return:+.4f} < "
+                f"{PROMOTION_MAX_NEGATIVE_PERIOD_RETURN:+.4f})"
+            )
+
     if baseline is None:
-        # 絶対値基準を満たした場合のみ、比較対象がない初回モデルとして保存する。
-        return True, "絶対値基準を満たし、比較可能な既存モデルもないため初回モデルとして保存"
+        # 絶対値基準・期間安定性を満たした場合のみ、比較対象がない初回モデルとして保存する。
+        return True, "絶対値基準・期間安定性を満たし、比較可能な既存モデルもないため初回モデルとして保存"
     if candidate["trades"] < PROMOTION_MIN_TRADES:
         return False, f"候補の取引数不足 ({candidate['trades']} < {PROMOTION_MIN_TRADES})"
     if baseline["trades"] < PROMOTION_MIN_TRADES:
@@ -889,7 +973,7 @@ def should_promote_candidate(candidate: dict, baseline: dict | None) -> tuple[bo
         )
     if candidate["win_rate"] < baseline["win_rate"] - PROMOTION_MAX_WIN_RATE_DECLINE:
         return False, "勝率の低下が許容範囲を超過"
-    return True, f"目的関数改善 {improvement:+.4f}、勝率条件・取引数を満たしたため昇格"
+    return True, f"目的関数改善 {improvement:+.4f}、勝率条件・取引数・期間安定性を満たしたため昇格"
 
 
 def add_stability_metrics(
@@ -2108,6 +2192,26 @@ def main():
         disagreements=test_disagreements,
         max_ensemble_disagreement=max_ensemble_disagreement,
     )
+    test_sub_periods = evaluate_test_period_stability(
+        test_scores,
+        test_df["future_excess_return"].to_numpy(),
+        ml_buy_threshold,
+        test_df,
+        test_df["sector_label"],
+        sector_ml_buy_thresholds,
+        market_regime_threshold_offsets,
+        test_df["date"],
+        max_daily_ml_buy_candidates,
+        disagreements=test_disagreements,
+        max_ensemble_disagreement=max_ensemble_disagreement,
+    )
+    if test_sub_periods:
+        print("テスト期間のサブ期間別成績(昇格判定の期間安定性チェック用):")
+        for p in test_sub_periods:
+            print(
+                f"  {p['start']}〜{p['end']}: trades={p['trades']} "
+                f"avg_return={p['avg_return'] * 100:+.2f}%"
+            )
 
     previous_eval = None
     previous_eval_error = None
@@ -2124,7 +2228,7 @@ def main():
         else:
             print(f"既存モデル比較をスキップ: {previous_eval_error}")
 
-    promote, promotion_reason = should_promote_candidate(test_eval, previous_eval)
+    promote, promotion_reason = should_promote_candidate(test_eval, previous_eval, test_sub_periods)
     print(f"モデル昇格判定: {'昇格' if promote else '見送り'} — {promotion_reason}")
     print(
         f"\nテストデータでの最終評価(市場・業種に対する超過リターン、日次上位{max_daily_ml_buy_candidates}件、"
@@ -2234,6 +2338,12 @@ def main():
                 "promoted": promote,
                 "reason": promotion_reason,
                 "candidate_test_eval": test_eval,
+                "candidate_test_sub_periods": test_sub_periods,
+                "test_sub_periods_config": {
+                    "splits": PROMOTION_TEST_SUB_PERIODS,
+                    "min_positive_ratio": PROMOTION_MIN_POSITIVE_PERIOD_RATIO,
+                    "max_negative_period_return": PROMOTION_MAX_NEGATIVE_PERIOD_RETURN,
+                },
                 "baseline_test_eval": previous_eval,
                 "baseline_comparison_error": previous_eval_error,
             },
