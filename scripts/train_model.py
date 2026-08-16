@@ -21,7 +21,17 @@ import yfinance as yf
 import optuna
 from supabase import create_client
 
-from fetch_and_signal import TICKERS, calc_rsi, calc_macd, calc_bollinger, calc_adx, get_screener_tickers, get_jp_sector_map
+from fetch_and_signal import (
+    TICKERS,
+    calc_rsi,
+    calc_macd,
+    calc_bollinger,
+    calc_adx,
+    get_screener_tickers,
+    get_jp_sector_map,
+    get_holdings_tickers,
+    get_previous_signal_tickers,
+)
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier
 from sklearn.metrics import accuracy_score, classification_report
 from sklearn.utils.class_weight import compute_sample_weight
@@ -1514,15 +1524,46 @@ def add_excess_return_targets(
     return result
 
 
+def get_supabase_client():
+    """環境変数から認証情報が取れる場合だけSupabaseクライアントを返す(無ければNone)。"""
+    url = os.environ.get("SUPABASE_URL")
+    key = os.environ.get("SUPABASE_SERVICE_KEY")
+    if not url or not key:
+        return None
+    return create_client(url, key)
+
+
 def build_dataset() -> pd.DataFrame:
     rows = []
 
-    # 主力銘柄 + スクリーニング銘柄(値上がり/値下がり上位)を学習データに含めて母数を増やす
+    sb = get_supabase_client()
+
+    # 主力銘柄 + 保有株 + 前回シグナル銘柄 + スクリーニング銘柄(値上がり/値下がり上位)を
+    # 学習データに含める。日次推論(select_daily_tickers)が実際に予測対象とする銘柄群と
+    # 学習ユニバースの分布を揃えるため(保有株など学習データに一度も出てこない銘柄にも
+    # 日次推論している不整合の解消)。JPX全銘柄からの無差別補充は含めない
+    # (2026-07-30、無差別な銘柄拡大でavg_return悪化・revert済みのため同じ轍を踏まない)。
     all_tickers = dict(TICKERS)
+
+    if sb is not None:
+        holdings_tickers = get_holdings_tickers(sb)
+        print(f"holdings found {len(holdings_tickers)} tickers")
+        for t, n in holdings_tickers.items():
+            all_tickers.setdefault(t, n)
+
+        previous_signal_tickers = get_previous_signal_tickers(sb)
+        print(f"previous signal tickers found {len(previous_signal_tickers)} tickers")
+        for t, n in previous_signal_tickers.items():
+            all_tickers.setdefault(t, n)
+    else:
+        print("holdings/previous signal tickers skipped: Supabase認証情報がありません")
+
     screener_tickers = get_screener_tickers()
     print(f"screener found {len(screener_tickers)} tickers")
     for t, n in screener_tickers.items():
         all_tickers.setdefault(t, n)
+
+    print(f"training universe: {len(all_tickers)} tickers")
 
     nikkei = get_nikkei_returns()
     sectors = get_jp_sector_map()
@@ -1531,6 +1572,7 @@ def build_dataset() -> pd.DataFrame:
         list(all_tickers),
         today - pd.DateOffset(years=2),
         today,
+        sb=sb,
     )
 
     feature_frames = {}
