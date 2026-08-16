@@ -87,6 +87,12 @@ TRANSACTION_COST = 0.002
 # Optunaの試行は速度優先で先頭シードのみ、最終モデルとwalk-forward評価は全シードを使う。
 ENSEMBLE_SEEDS = [42, 202, 777]
 
+# スコア較正は、学習済みモデル自身の学習データ予測ではなく、日付単位の
+# expanding-window OOF予測から作る。各fold境界にはラベル期間分のエンバーゴを置く。
+OOF_CALIBRATION_FOLDS = 3
+OOF_CALIBRATION_MIN_TRAIN_DATES = 120
+OOF_CALIBRATION_MIN_SCORES = 500
+
 # soft votingを構成する個別推定器の確率の標準偏差。値が大きい候補は、
 # モデル間で見解が割れているため、検証期間で選んだ上限を超えた場合は見送る。
 # None はフィルターなしで、既存モデルとの後方互換にも使う。
@@ -445,6 +451,96 @@ def calibrate_scores(raw_scores, calibration_values: list[float] | None):
         return raw_scores
     percentiles = [p / 100 for p in range(0, 101, 5)]
     return np.interp(raw_scores, calibration_values, percentiles)
+
+
+def build_time_series_oof_calibration(
+    model_factory,
+    X: pd.DataFrame,
+    y: pd.Series,
+    dates,
+    folds: int = OOF_CALIBRATION_FOLDS,
+    embargo_days: int = LABEL_LOOKAHEAD_DAYS,
+) -> tuple[list[float] | None, dict]:
+    """未来を使わない日付単位のOOF予測から分位点較正表を作る。
+
+    同一日の複数銘柄を必ず同じfoldに置き、検証開始日の直前には
+    ラベル先読み期間分の取引日を空ける。各foldのクラス重み・直近重みも、
+    そのfoldで利用可能な学習行だけから再計算する。
+    """
+    X = X.reset_index(drop=True)
+    y = pd.Series(y).reset_index(drop=True)
+    date_values = pd.to_datetime(pd.Series(dates)).reset_index(drop=True)
+    unique_dates = np.array(sorted(date_values.dt.normalize().unique()))
+    metadata = {
+        "method": "purged_expanding_time_series_oof",
+        "folds_requested": int(folds),
+        "embargo_days": int(embargo_days),
+        "folds": [],
+        "fallback": None,
+    }
+    minimum_dates = OOF_CALIBRATION_MIN_TRAIN_DATES + folds * 5
+    if len(unique_dates) < minimum_dates:
+        metadata["fallback"] = f"取引日不足 ({len(unique_dates)} < {minimum_dates})"
+        return None, metadata
+
+    first_validation_position = max(OOF_CALIBRATION_MIN_TRAIN_DATES, len(unique_dates) // 2)
+    validation_chunks = [
+        chunk
+        for chunk in np.array_split(unique_dates[first_validation_position:], folds)
+        if len(chunk)
+    ]
+    oof_scores = []
+    normalized_dates = date_values.dt.normalize().to_numpy()
+    for fold_number, validation_dates in enumerate(validation_chunks, start=1):
+        validation_start_position = int(np.searchsorted(unique_dates, validation_dates[0]))
+        cutoff_position = max(validation_start_position - embargo_days, 0)
+        train_dates = unique_dates[:cutoff_position]
+        if not len(train_dates):
+            continue
+        train_mask = np.isin(normalized_dates, train_dates)
+        validation_mask = np.isin(normalized_dates, validation_dates)
+        fold_y = y.iloc[np.flatnonzero(train_mask)]
+        if not validation_mask.any() or fold_y.nunique() < 2:
+            continue
+
+        fold_date_values = date_values.iloc[np.flatnonzero(train_mask)]
+        fold_age_days = (fold_date_values.max() - fold_date_values).dt.days.to_numpy()
+        fold_recency_weight = 0.5 ** (fold_age_days / RECENCY_HALFLIFE_DAYS)
+        fold_sample_weight = (
+            compute_sample_weight(class_weight="balanced", y=fold_y) * fold_recency_weight
+        )
+        fold_model = model_factory()
+        fold_model.fit(
+            X.iloc[np.flatnonzero(train_mask)],
+            fold_y,
+            sample_weight=fold_sample_weight,
+        )
+        fold_scores = fold_model.predict_proba(X.iloc[np.flatnonzero(validation_mask)])[:, 1]
+        oof_scores.append(fold_scores)
+        metadata["folds"].append(
+            {
+                "fold": fold_number,
+                "train_start": str(pd.Timestamp(train_dates[0]).date()),
+                "train_end": str(pd.Timestamp(train_dates[-1]).date()),
+                "validation_start": str(pd.Timestamp(validation_dates[0]).date()),
+                "validation_end": str(pd.Timestamp(validation_dates[-1]).date()),
+                "train_rows": int(train_mask.sum()),
+                "validation_rows": int(validation_mask.sum()),
+            }
+        )
+
+    if not oof_scores:
+        metadata["fallback"] = "有効なOOF foldを作成できない"
+        return None, metadata
+    raw_oof_scores = np.concatenate(oof_scores)
+    metadata["score_count"] = int(len(raw_oof_scores))
+    if len(raw_oof_scores) < OOF_CALIBRATION_MIN_SCORES:
+        metadata["fallback"] = (
+            f"OOF予測数不足 ({len(raw_oof_scores)} < {OOF_CALIBRATION_MIN_SCORES})"
+        )
+        return None, metadata
+    percentiles = np.linspace(0, 100, 21)
+    return np.percentile(raw_oof_scores, percentiles).tolist(), metadata
 
 
 def _feature_value(row: pd.Series, column: str, default: float = 0.0) -> float:
@@ -1917,13 +2013,25 @@ def main():
     ):
         print(f"  {col}: {importance:.3f}")
 
-    # predict_probaの出力分布が偏っている(ラベル陽性率が低い)ため、
-    # 学習データでの予測確率の分位点を保存し、推論時に0〜1へ較正し直す。
-    # これにより「50%」が平均的な銘柄、両端が相対的に強気/弱気な銘柄を表すようになる。
-    # (テスト/検証データを混ぜると評価リークになるため学習データのみを使用)
-    train_proba = model.predict_proba(X_train)[:, 1]
-    calibration_percentiles = np.linspace(0, 100, 21)
-    calibration_values = np.percentile(train_proba, calibration_percentiles).tolist()
+    # 学習済みモデル自身の学習データ予測は過信しやすいため、日付単位の
+    # expanding-window OOF予測で0〜1の分位点較正表を作る。各境界はエンバーゴ済み。
+    # データ不足時だけ、後方互換のため従来の学習内予測へフォールバックする。
+    calibration_values, calibration_metadata = build_time_series_oof_calibration(
+        lambda: build_voting_model(best_rf_params, best_gb_params, best_lgbm_params),
+        X_train,
+        y_train,
+        train_df["date"],
+    )
+    if calibration_values is None:
+        train_proba = model.predict_proba(X_train)[:, 1]
+        calibration_values = np.percentile(train_proba, np.linspace(0, 100, 21)).tolist()
+        calibration_metadata["method"] = "in_sample_percentile_fallback"
+        print(f"OOFスコア較正をフォールバック: {calibration_metadata['fallback']}")
+    else:
+        print(
+            f"OOFスコア較正: {len(calibration_metadata['folds'])} folds / "
+            f"{calibration_metadata['score_count']}予測"
+        )
     print(f"\nスコア較正テーブル(0/25/50/75/100%点): "
           f"{calibration_values[0]:.3f} / {calibration_values[5]:.3f} / "
           f"{calibration_values[10]:.3f} / {calibration_values[15]:.3f} / {calibration_values[-1]:.3f}")
@@ -2067,6 +2175,7 @@ def main():
             "sector_columns": sector_columns,
             "feature_version": "candlestick_news_calendar_liquidity_v4",
             "score_calibration": calibration_values,
+            "score_calibration_metadata": calibration_metadata,
             "ml_buy_threshold": ml_buy_threshold,
             "sector_ml_buy_thresholds": sector_ml_buy_thresholds,
             "threshold_results": threshold_results,
@@ -2107,6 +2216,7 @@ def main():
                 "recency_halflife_days": RECENCY_HALFLIFE_DAYS,
                 "transaction_cost": TRANSACTION_COST,
                 "ensemble_seeds": ENSEMBLE_SEEDS,
+                "score_calibration_method": calibration_metadata["method"],
                 "train_history_period": TRAIN_HISTORY_PERIOD,
                 "breadth_feature_count": len(BREADTH_FEATURE_COLUMNS),
                 "selected_feature_count": len(feature_columns),

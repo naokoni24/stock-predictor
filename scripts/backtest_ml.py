@@ -22,6 +22,7 @@ from train_model import (
     add_sector_relative_features,
     adjusted_ml_buy_threshold,
     build_features,
+    build_time_series_oof_calibration,
     build_voting_model,
     calibrate_scores,
     ensemble_disagreement,
@@ -413,8 +414,16 @@ def run_walk_forward_evaluation(dataset: pd.DataFrame, sector_columns: list[str]
         )
         model.fit(train_df[feature_columns], train_df["label"], sample_weight=sample_weight)
 
-        train_proba = model.predict_proba(train_df[feature_columns])[:, 1]
-        calibration_values = np.percentile(train_proba, np.linspace(0, 100, 21)).tolist()
+        calibration_values, calibration_metadata = build_time_series_oof_calibration(
+            make_walk_forward_model,
+            train_df[feature_columns],
+            train_df["label"],
+            train_df["date"],
+        )
+        if calibration_values is None:
+            train_proba = model.predict_proba(train_df[feature_columns])[:, 1]
+            calibration_values = np.percentile(train_proba, np.linspace(0, 100, 21)).tolist()
+            print(f"  OOF較正フォールバック: {calibration_metadata['fallback']}")
 
         val_raw_proba = model.predict_proba(val_df[feature_columns])[:, 1]
         val_scores = calibrate_scores(val_raw_proba, calibration_values)
