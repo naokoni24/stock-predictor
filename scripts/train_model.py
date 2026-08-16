@@ -55,6 +55,10 @@ EXCESS_RETURN_TARGET = 0.005
 MIN_SECTOR_BENCHMARK_MEMBERS = 3
 MAX_DAILY_ML_BUY_CANDIDATES = 10
 
+# 日次のML買い候補上限件数の検証グリッド。既定値(10)を含め、絞る/広げる
+# 両方向を検証期間で比較する(optimize_max_daily_candidates)。
+MAX_DAILY_CANDIDATES_GRID = [5, 10, 15, 20, 30]
+
 # 日本株の売買候補・学習対象に必要な20日平均売買代金(円)。
 # 1億円未満は少額注文でも価格影響やスプレッドが大きくなりやすいため除外する。
 MIN_AVG_DAILY_TRADED_VALUE = 100_000_000
@@ -1065,6 +1069,59 @@ def optimize_ensemble_disagreement(
     return best["max_ensemble_disagreement"], results
 
 
+def optimize_max_daily_candidates(
+    scores,
+    future_returns,
+    threshold: float,
+    feature_rows: pd.DataFrame,
+    sectors: pd.Series,
+    sector_thresholds: dict[str, float],
+    market_regime_threshold_offsets: dict[str, float] | None,
+    dates,
+    disagreements=None,
+    max_ensemble_disagreement: float | None = None,
+) -> tuple[int, list[dict]]:
+    """検証期間だけで日次のML買い候補上限件数を選ぶ。
+
+    「上位10件」という件数は検証されていなかったため、しきい値・業種別・
+    局面別・アンサンブル不一致など他の設定を固定した上でMAX_DAILY_CANDIDATES_GRID
+    から比較する。取引数が少なすぎる件数は評価が不安定として除外し、
+    候補が無ければ既定値(MAX_DAILY_ML_BUY_CANDIDATES)にフォールバックする。
+    """
+    min_trades = max(30, int(len(scores) * 0.02))
+    results = []
+    for candidates in MAX_DAILY_CANDIDATES_GRID:
+        result = evaluate_threshold(
+            scores,
+            future_returns,
+            threshold,
+            feature_rows,
+            sectors,
+            sector_thresholds,
+            market_regime_threshold_offsets,
+            dates=dates,
+            max_daily_candidates=candidates,
+            disagreements=disagreements,
+            max_ensemble_disagreement=max_ensemble_disagreement,
+        )
+        result["max_daily_candidates"] = candidates
+        results.append(result)
+
+    valid = [result for result in results if result["trades"] >= min_trades]
+    if not valid:
+        return MAX_DAILY_ML_BUY_CANDIDATES, results
+    best = max(
+        valid,
+        key=lambda result: (
+            result["objective"],
+            result["avg_return"],
+            result["win_rate"],
+            result["trades"],
+        ),
+    )
+    return best["max_daily_candidates"], results
+
+
 def build_market_features(symbols: str | list[str], prefix: str) -> pd.DataFrame:
     """市場指数・為替データを同じ形式の特徴量へ変換"""
     if isinstance(symbols, str):
@@ -1846,6 +1903,19 @@ def main():
         MAX_DAILY_ML_BUY_CANDIDATES,
         market_regime_threshold_offsets,
     )
+    max_daily_ml_buy_candidates, daily_candidates_results = optimize_max_daily_candidates(
+        val_scores,
+        val_df["future_excess_return"].to_numpy(),
+        ml_buy_threshold,
+        val_df,
+        val_df["sector_label"],
+        sector_ml_buy_thresholds,
+        market_regime_threshold_offsets,
+        val_df["date"],
+        disagreements=val_disagreements,
+        max_ensemble_disagreement=max_ensemble_disagreement,
+    )
+    print(f"採用する日次ML買い候補上限件数: {max_daily_ml_buy_candidates}件")
 
     # テストデータ(完全に未使用のデータ)でしきい値の最終評価を行う
     test_raw_proba = model.predict_proba(test_df[feature_columns])[:, 1]
@@ -1860,7 +1930,7 @@ def main():
         sector_ml_buy_thresholds,
         market_regime_threshold_offsets,
         dates=test_df["date"],
-        max_daily_candidates=MAX_DAILY_ML_BUY_CANDIDATES,
+        max_daily_candidates=max_daily_ml_buy_candidates,
         disagreements=test_disagreements,
         max_ensemble_disagreement=max_ensemble_disagreement,
     )
@@ -1883,7 +1953,7 @@ def main():
     promote, promotion_reason = should_promote_candidate(test_eval, previous_eval)
     print(f"モデル昇格判定: {'昇格' if promote else '見送り'} — {promotion_reason}")
     print(
-        f"\nテストデータでの最終評価(市場・業種に対する超過リターン、日次上位{MAX_DAILY_ML_BUY_CANDIDATES}件、"
+        f"\nテストデータでの最終評価(市場・業種に対する超過リターン、日次上位{max_daily_ml_buy_candidates}件、"
         f"共通しきい値{ml_buy_threshold:.2f}+業種別調整、"
         f"往復コスト{TRANSACTION_COST * 100:.1f}%控除後): "
         f"trades={test_eval['trades']} win_rate={test_eval['win_rate'] * 100:.1f}% "
@@ -1947,6 +2017,12 @@ def main():
                 "results": disagreement_results,
                 "metric": "validation_net_excess_return_objective",
             },
+            "daily_candidates_optimization": {
+                "selected": max_daily_ml_buy_candidates,
+                "grid": MAX_DAILY_CANDIDATES_GRID,
+                "results": daily_candidates_results,
+                "metric": "validation_net_excess_return_objective",
+            },
             "threshold_optimization": {
                 "horizon_days": HORIZON_DAYS,
                 "label_lookahead_days": LABEL_LOOKAHEAD_DAYS,
@@ -1967,7 +2043,7 @@ def main():
                 "breadth_feature_count": len(BREADTH_FEATURE_COLUMNS),
                 "selected_feature_count": len(feature_columns),
                 "total_feature_count": len(all_feature_columns),
-                "max_daily_ml_buy_candidates": MAX_DAILY_ML_BUY_CANDIDATES,
+                "max_daily_ml_buy_candidates": max_daily_ml_buy_candidates,
                 "market_data_alignment": "us_fx_next_jp_business_day",
                 "news_feature_columns": NEWS_FEATURE_COLUMNS,
                 "calendar_feature_columns": CALENDAR_FEATURE_COLUMNS,
