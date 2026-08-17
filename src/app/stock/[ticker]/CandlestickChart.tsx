@@ -58,11 +58,16 @@ function Candle({ x, y, width, height, payload }: CandleProps) {
 
 export default function CandlestickChart({ data }: { data: PricePoint[] }) {
   const chartData = data.map((d) => ({ ...d, range: [d.low, d.high] }));
-  const closes = data.map((d) => d.close).filter((v) => v != null);
-  const lows = data.map((d) => d.low ?? d.close);
-  const highs = data.map((d) => d.high ?? d.close);
-  const min = Math.min(...lows, ...closes);
-  const max = Math.max(...highs, ...closes);
+  // yfinanceが当日終値をまだ確定配信していない日はlow/high/closeが同時にnullで
+  // 保存されることがある。Math.min/maxはnullを0として扱ってしまい、そのままだと
+  // 縦軸スケールが実際の株価と無関係な0近辺まで歪むため、null値は完全に除外する。
+  const validValues = [
+    ...data.map((d) => d.low),
+    ...data.map((d) => d.high),
+    ...data.map((d) => d.close),
+  ].filter((v): v is number => v != null);
+  const min = validValues.length ? Math.min(...validValues) : 0;
+  const max = validValues.length ? Math.max(...validValues) : 1;
   const pad = (max - min) * 0.05 || 1;
 
   return (
