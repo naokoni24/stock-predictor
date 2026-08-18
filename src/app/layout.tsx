@@ -52,10 +52,12 @@ export default async function RootLayout({
   children: React.ReactNode;
 }>) {
   const supabase = await createClient();
+  // getSession()はCookie内のJWTをSupabase Authサーバーへ問い合わせず信頼してしまうため、
+  // サーバーサイドでは非推奨。実際のアクセス制御はsrc/proxy.ts(middleware)のgetUser()が
+  // 担っているため実害はなかったが、レイアウトの表示判定もgetUser()に揃える。
   const {
-    data: { session },
-  } = await supabase.auth.getSession();
-  const user = session?.user ?? null;
+    data: { user },
+  } = await supabase.auth.getUser();
 
   return (
     <html
