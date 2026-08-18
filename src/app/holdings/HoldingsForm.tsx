@@ -10,7 +10,15 @@ import TickerSearch from "./TickerSearch";
 import { SubmitButton } from "@/components/login-submit-button";
 import { cn } from "@/lib/utils";
 
-export default function HoldingsForm({ error, collapsedByDefault }: { error?: string; collapsedByDefault?: boolean }) {
+export default function HoldingsForm({
+  error,
+  collapsedByDefault,
+  holdingsCount,
+}: {
+  error?: string;
+  collapsedByDefault?: boolean;
+  holdingsCount?: number;
+}) {
   const [open, setOpen] = useState(!collapsedByDefault);
 
   // 保有株の有無（＝折りたたみ表示にすべきか）はサーバー側の再レンダリングで
@@ -47,6 +55,11 @@ export default function HoldingsForm({ error, collapsedByDefault }: { error?: st
       {open && (
       <CardContent className="pt-4 pb-4">
         <form
+          // 保有株の追加・削除のたびにholdingsCountが変わるためkeyにする。
+          // HoldingsFormはNextのソフトナビゲーションでアンマウントされないため、
+          // keyを変えないと追加成功後もTickerSearchの選択銘柄・株数・取得単価の
+          // 入力値が残ったままになり、連続追加時に誤って同じ銘柄を二重登録しやすい。
+          key={holdingsCount}
           action={addHolding}
           onSubmit={(e) => {
             const formData = new FormData(e.currentTarget);
