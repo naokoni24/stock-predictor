@@ -58,13 +58,18 @@ export default async function HoldingsPage({
   // 各銘柄の最新シグナルのみ残す。yfinanceが当日終値をまだ確定配信していない
   // 日はcloseがnullで保存されるため、そのような行は使わず直近の有効な行を使う
   // (評価額が取得額にフォールバックして損益が不自然に見える不具合の修正)。
+  // 前日比を出すため、直近の有効な行に加えてその1つ前の有効な行(前営業日終値)も保持する。
   const latestByTicker = new Map<
     string,
     { close: number; date: string; signal: string | null; rsi14: number | null }
   >();
+  const prevCloseByTicker = new Map<string, number>();
   for (const s of latestSignals ?? []) {
-    if (!latestByTicker.has(s.ticker) && s.close != null) {
+    if (s.close == null) continue;
+    if (!latestByTicker.has(s.ticker)) {
       latestByTicker.set(s.ticker, { close: s.close, date: s.date, signal: s.signal, rsi14: s.rsi14 });
+    } else if (!prevCloseByTicker.has(s.ticker)) {
+      prevCloseByTicker.set(s.ticker, s.close);
     }
   }
 
@@ -79,6 +84,14 @@ export default async function HoldingsPage({
     const costValue = h.cost_price * h.shares;
     const profitAmount = marketValue != null ? marketValue - costValue : null;
 
+    // 前日比（前営業日終値との比較）。取得単価とは無関係に「今日の値動き」を示す。
+    const prevClose = prevCloseByTicker.get(h.ticker) ?? null;
+    const dayChangeRate =
+      currentPrice != null && prevClose ? ((currentPrice - prevClose) / prevClose) * 100 : null;
+    const prevMarketValue = prevClose != null ? prevClose * h.shares : null;
+    const dayChangeAmount =
+      marketValue != null && prevMarketValue != null ? marketValue - prevMarketValue : null;
+
     // 推奨損切り価格（取得単価 -8%）。現在値が割っていれば到達フラグを立てる。
     const stopLossPrice = h.cost_price * (1 - STOP_LOSS_PCT);
     const stopLossHit = currentPrice != null && currentPrice <= stopLossPrice;
@@ -91,7 +104,10 @@ export default async function HoldingsPage({
       profitRate,
       profitAmount,
       marketValue,
+      prevMarketValue,
       costValue,
+      dayChangeRate,
+      dayChangeAmount,
       stopLossPrice,
       stopLossHit,
       signal: latest?.signal ?? null,
@@ -106,6 +122,15 @@ export default async function HoldingsPage({
   const totalCostValue = rows.reduce((sum, r) => sum + r.costValue, 0);
   const totalProfit = totalMarketValue - totalCostValue;
   const totalProfitRate = totalCostValue ? (totalProfit / totalCostValue) * 100 : 0;
+
+  // 前日比（ポートフォリオ全体）。前日終値が取れない銘柄は現在値をそのまま前日値として扱い
+  // (変化なし扱い)、合計の整合性を保つ。
+  const totalPrevMarketValue = rows.reduce(
+    (sum, r) => sum + (r.prevMarketValue ?? r.marketValue ?? r.costValue),
+    0
+  );
+  const totalDayChange = totalMarketValue - totalPrevMarketValue;
+  const totalDayChangeRate = totalPrevMarketValue ? (totalDayChange / totalPrevMarketValue) * 100 : 0;
 
   return (
     <div className="flex flex-col gap-6">
@@ -147,6 +172,21 @@ export default async function HoldingsPage({
             </CardHeader>
             <CardContent>
               <p className="text-2xl font-bold tabular-nums">¥{Math.round(totalMarketValue).toLocaleString()}</p>
+              {rows.some((r) => r.dayChangeAmount != null) && (
+                <div
+                  className={cn(
+                    "flex items-center gap-0.5 text-xs font-medium tabular-nums mt-1",
+                    totalDayChange >= 0 ? "text-bullish" : "text-bearish"
+                  )}
+                >
+                  {totalDayChange >= 0 ? <ArrowUpRight className="size-3" /> : <ArrowDownRight className="size-3" />}
+                  前日比 {totalDayChange >= 0 ? "+" : "-"}¥{Math.round(Math.abs(totalDayChange)).toLocaleString()}
+                  <span>
+                    ({totalDayChange >= 0 ? "+" : ""}
+                    {totalDayChangeRate.toFixed(1)}%)
+                  </span>
+                </div>
+              )}
             </CardContent>
           </Card>
           <Card>
@@ -228,6 +268,19 @@ export default async function HoldingsPage({
                 {h.shares}株 / 取得単価 ¥{h.cost_price.toLocaleString()}
                 {h.currentPrice != null && (
                   <> / {h.currentPriceDate ? getCloseLabel(h.currentPriceDate) : "前日終値"} ¥{h.currentPrice.toLocaleString()}</>
+                )}
+                {h.dayChangeRate != null && h.dayChangeAmount != null && (
+                  <span
+                    className={cn(
+                      "ml-1.5 inline-flex items-center gap-0.5 font-medium tabular-nums whitespace-nowrap",
+                      h.dayChangeRate >= 0 ? "text-bullish" : "text-bearish"
+                    )}
+                  >
+                    {h.dayChangeRate >= 0 ? <ArrowUpRight className="size-3" /> : <ArrowDownRight className="size-3" />}
+                    前日比 {h.dayChangeAmount >= 0 ? "+" : "-"}¥{Math.round(Math.abs(h.dayChangeAmount)).toLocaleString()}
+                    {" "}({h.dayChangeRate >= 0 ? "+" : ""}
+                    {h.dayChangeRate.toFixed(1)}%)
+                  </span>
                 )}
               </p>
               <p
