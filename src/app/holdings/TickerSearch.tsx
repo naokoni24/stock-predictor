@@ -33,14 +33,24 @@ export default function TickerSearch() {
 
     const timer = setTimeout(async () => {
       // 銘柄名だけでなく証券コードでも検索できるようにする
-      // (「本田技研工業」のようにカタカナの通称では名前検索にヒットしない銘柄があるため)
-      const { data } = await supabase
-        .from("stocks")
-        .select("ticker, name")
-        .or(`name.ilike.%${query}%,ticker.ilike.%${query}%`)
-        .limit(8);
+      // (「本田技研工業」のようにカタカナの通称では名前検索にヒットしない銘柄があるため)。
+      // .or()に検索語をそのまま埋め込むと、PostgRESTのor構文はカンマを条件の区切り文字
+      // として解釈するため、検索語に「,」が含まれると400エラーになり候補が出せなくなる
+      // (かつエラーを読んでいなかったため無反応に見えていた)。name/tickerを別クエリに
+      // 分けて実行しmerge・重複除去することでこの問題を避ける。
+      const [byName, byTicker] = await Promise.all([
+        supabase.from("stocks").select("ticker, name").ilike("name", `%${query}%`).limit(8),
+        supabase.from("stocks").select("ticker, name").ilike("ticker", `%${query}%`).limit(8),
+      ]);
 
-      setOptions(data ?? []);
+      if (byName.error) console.error("stock search (name) failed:", byName.error.message);
+      if (byTicker.error) console.error("stock search (ticker) failed:", byTicker.error.message);
+
+      const merged = new Map<string, StockOption>();
+      for (const row of [...(byName.data ?? []), ...(byTicker.data ?? [])]) {
+        merged.set(row.ticker, row);
+      }
+      setOptions(Array.from(merged.values()).slice(0, 8));
     }, 250);
 
     return () => clearTimeout(timer);
