@@ -454,7 +454,23 @@ def get_fundamentals(yf_ticker: yf.Ticker) -> dict:
 
 
 def make_signal(row) -> tuple[str | None, float]:
-    """ルールベースでシグナルとスコアを決定"""
+    """ルールベースでシグナルとスコアを決定
+
+    スコアは「強気度」を表す符号付きの値。買い候補は正、売り候補は負で、
+    絶対値が大きいほどシグナルが強い。トップページは買い候補を降順、売り候補を
+    昇順で並べて上位を表示するため、この符号の向きに依存している。
+
+    買い候補: ゴールデンクロス + RSIが過熱でない + MACD陽転 + バンド上限以下
+    売り候補: デッドクロス または RSI過熱
+    どちらにも該当しない場合は hold。
+
+    注意(2026-08-18修正): 以前は売り判定が買い判定と独立した `if` で、かつ条件に
+    MACD陰転・バンド上限超えを含んでいた。元の実装では買い/売りの条件が排他だったが、
+    MACD・ボリンジャーバンドを売り条件へ追加した際に排他性が壊れ、買い候補の条件を
+    満たす銘柄がMACDのわずかな陰転だけで売り候補へ上書きされていた(しかも買いロジックで
+    計算した正のスコアを持ったまま)。MACD陰転・バンド上限超えは「買いから外す」条件として
+    扱い、弱気条件に該当しない銘柄は hold にする。
+    """
     if (
         pd.isna(row["sma25"])
         or pd.isna(row["sma75"])
@@ -469,32 +485,46 @@ def make_signal(row) -> tuple[str | None, float]:
     score = 0.0
     signal = "hold"
     macd_diff = row["macd"] - row["macd_signal"]
+    bb_width = row["bb_upper"] - row["bb_lower"]
+    bb_position = (row["Close"] - row["bb_lower"]) / bb_width if bb_width > 0 else None
 
-    # ゴールデンクロス気味（短期線が長期線の上）+ RSIが過熱でない -> 買い候補
-    if row["sma25"] > row["sma75"] and row["rsi14"] < 60:
+    # ゴールデンクロス気味(短期線が長期線の上)+ RSIが過熱でない
+    # + 上昇モメンタムあり + バンド上限を超えていない -> 買い候補
+    if (
+        row["sma25"] > row["sma75"]
+        and row["rsi14"] < 60
+        and macd_diff >= 0
+        and row["Close"] <= row["bb_upper"]
+    ):
         signal = "buy_candidate"
         score += (row["sma25"] / row["sma75"] - 1) * 100
         score += max(0, 50 - row["rsi14"]) * 0.1
 
         # MACDがシグナルを上回っている(上昇モメンタム)ほど加点
-        if macd_diff > 0:
-            score += macd_diff * 2
+        score += macd_diff * 2
 
         # ボリンジャーバンド下限近くは押し目買いとして加点
-        bb_width = row["bb_upper"] - row["bb_lower"]
-        if bb_width > 0:
-            position = (row["Close"] - row["bb_lower"]) / bb_width
-            if position < 0.3:
-                score += (0.3 - position) * 10
+        if bb_position is not None and bb_position < 0.3:
+            score += (0.3 - bb_position) * 10
 
-    # デッドクロス気味、RSI過熱、MACDデッドクロス、バンド上限超え -> 売り候補
-    if (
-        row["sma25"] < row["sma75"]
-        or row["rsi14"] > 75
-        or macd_diff < 0
-        or row["Close"] > row["bb_upper"]
-    ):
+    # デッドクロス気味、またはRSI過熱 -> 売り候補
+    elif row["sma25"] < row["sma75"] or row["rsi14"] > 75:
         signal = "sell_candidate"
+
+        # 買い候補と対称に、弱気度を負のスコアで表す(絶対値が大きいほど弱気)。
+        # 以前は売り候補のスコアが常に0.0で全件同点だったため、トップページの
+        # 売り候補上位10件が事実上ランダムに選ばれていた(2026-08-18修正)。
+        if row["sma25"] < row["sma75"]:
+            score -= (1 - row["sma25"] / row["sma75"]) * 100
+        score -= max(0, row["rsi14"] - 50) * 0.1
+
+        # MACDがシグナルを下回っている(下落モメンタム)ほど減点
+        if macd_diff < 0:
+            score += macd_diff * 2
+
+        # ボリンジャーバンド上限近くは過熱として減点
+        if bb_position is not None and bb_position > 0.7:
+            score -= (bb_position - 0.7) * 10
 
     return signal, round(score, 4)
 

@@ -77,15 +77,17 @@ def make_signal_param(row, rsi_buy_max: float = 60, rsi_sell_min: float = 75) ->
     macd_diff = row["macd"] - row["macd_signal"]
     signal = "hold"
 
-    if row["sma25"] > row["sma75"] and row["rsi14"] < rsi_buy_max:
-        signal = "buy_candidate"
-
+    # fetch_and_signal.make_signal と同じ判定にそろえる。
+    # MACD陰転・バンド上限超えは「買いから外す」条件として扱い、
+    # 売り候補は弱気条件(デッドクロス/RSI過熱)のみとする(2026-08-18修正)。
     if (
-        row["sma25"] < row["sma75"]
-        or row["rsi14"] > rsi_sell_min
-        or macd_diff < 0
-        or row["Close"] > row["bb_upper"]
+        row["sma25"] > row["sma75"]
+        and row["rsi14"] < rsi_buy_max
+        and macd_diff >= 0
+        and row["Close"] <= row["bb_upper"]
     ):
+        signal = "buy_candidate"
+    elif row["sma25"] < row["sma75"] or row["rsi14"] > rsi_sell_min:
         signal = "sell_candidate"
 
     return signal
