@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ChevronDown, PlusCircle } from "lucide-react";
 import { addHolding } from "./actions";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -12,6 +12,18 @@ import { cn } from "@/lib/utils";
 
 export default function HoldingsForm({ error, collapsedByDefault }: { error?: string; collapsedByDefault?: boolean }) {
   const [open, setOpen] = useState(!collapsedByDefault);
+
+  // 保有株の有無（＝折りたたみ表示にすべきか）はサーバー側の再レンダリングで
+  // props経由で変わるが、このコンポーネント自体はNextのソフトナビゲーションで
+  // アンマウントされずuseStateの初期値も再評価されないため、保有株を全て削除した
+  // 直後などcollapsedByDefaultの値が変化したタイミングでopen状態を明示的に
+  // 同期する。これをしないと「保有株ゼロになりフォームは常時展開されるはず」の
+  // 状態で、削除前の折りたたみ状態(open=false)が残ったままヘッダーのクリック
+  // ハンドラも外れ(collapsedByDefault=falseのため)、追加ボタンを押しても
+  // フォームが表示されない不具合になる。
+  useEffect(() => {
+    setOpen(!collapsedByDefault);
+  }, [collapsedByDefault]);
 
   return (
     <Card className="border-2 border-primary shadow-md py-0 gap-0 overflow-hidden">
