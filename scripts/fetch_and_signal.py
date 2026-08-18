@@ -605,7 +605,7 @@ def main():
     upsert_in_chunks(sb.table("prices"), all_price_rows)
 
     feature_frames = {}
-    if model_bundle is not None:
+    if model_bundle is not None and histories:
         from train_model import (
             add_breadth_features,
             add_sector_relative_features,
@@ -702,10 +702,15 @@ def main():
 WATCHLIST_SIZE = 10
 
 
+FUNDAMENTAL_FIELDS = ("per", "pbr", "target_price", "forecast_eps")
+
+
 def update_fundamentals(sb, all_tickers, jp_sectors, signal_results):
     """ウォッチリスト上位(買い/売り候補)+保有株に絞ってPER/PBR等を取得・保存する。
     .info取得は1銘柄あたり追加リクエストが発生し遅い・不安定なため対象を絞り、
-    取得できない・タイムアウトした銘柄はNoneのまま保存する。"""
+    取得できない・タイムアウトした銘柄は既存値を保持する(以前はNoneで上書きしており、
+    yfinance .infoの一時的な取得失敗だけで前日まで表示できていたPER/PBR等が
+    消えてしまう不具合があった)。"""
     buy_candidates = sorted(
         (r for r in signal_results if r["signal"] == "buy_candidate"),
         key=lambda r: r["score"],
@@ -722,14 +727,28 @@ def update_fundamentals(sb, all_tickers, jp_sectors, signal_results):
     if not targets:
         return
 
+    existing_res = (
+        sb.table("stocks")
+        .select("ticker, per, pbr, target_price, forecast_eps")
+        .in_("ticker", list(targets))
+        .execute()
+    )
+    existing_by_ticker = {row["ticker"]: row for row in existing_res.data or []}
+
     rows = []
     for ticker in targets:
         values = get_fundamentals(yf.Ticker(ticker))
+        existing = existing_by_ticker.get(ticker, {})
+        # 今回取得できた項目だけを上書きし、取得失敗(None)の項目は既存値を維持する
+        merged = {
+            field: values[field] if values[field] is not None else existing.get(field)
+            for field in FUNDAMENTAL_FIELDS
+        }
         rows.append({
             "ticker": ticker,
             "name": all_tickers.get(ticker, ticker),
             "sector": jp_sectors.get(ticker),
-            **values,
+            **merged,
         })
 
     sb.table("stocks").upsert(rows, on_conflict="ticker").execute()
