@@ -77,7 +77,9 @@ export default async function StockDetail({
       const idx = dateIndex.get(s.date);
       if (idx == null) continue;
       const future = prices[idx + HIT_RATE_HORIZON];
-      if (!future) continue;
+      // closeがnull(yfinanceの未確定/低調日)の場合、null(=0扱い)との比較で
+      // 的中率が不正に水増しされる不具合があったため、両方の終値が有効な場合のみ集計する。
+      if (!future || future.close == null || prices[idx].close == null) continue;
       total += 1;
       if (future.close > prices[idx].close) wins += 1;
     }

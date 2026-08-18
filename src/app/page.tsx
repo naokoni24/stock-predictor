@@ -84,8 +84,12 @@ async function fetchWatchlists() {
       .gte("date", since.toISOString().slice(0, 10))
       .order("date", { ascending: false });
 
+    // yfinanceが当日終値をまだ確定配信していない日/取引低調日はcloseがnullで
+    // 保存されるため、そのような行をスキップしないと前日比が(null - 実値)で
+    // 誤って-100%近い値として計算されてしまう不具合があった。直近の有効な2件のみを使う。
     const byTicker = new Map<string, number[]>();
     for (const p of prices ?? []) {
+      if (p.close == null) continue;
       const arr = byTicker.get(p.ticker) ?? [];
       if (arr.length < 2) arr.push(p.close);
       byTicker.set(p.ticker, arr);
@@ -267,12 +271,15 @@ export default async function Home() {
     .sort()
     .at(-1);
 
+  // 日次バッチの実行時刻は過去に13:00 JST→15:30 JSTへ変更されており、GitHub Actionsの
+  // スケジュール遅延(実績30〜40分程度)もあるため、固定の時刻表記(旧: 16:30時点)は
+  // バッチ時刻変更のたびにずれる。実際の実行時刻に依存しない「日付+取引終了後」表記にする。
   const lastUpdatedLabel = latestDate
     ? `最終更新: ${new Date(`${latestDate}T00:00:00+09:00`).toLocaleDateString("ja-JP", {
         timeZone: "Asia/Tokyo",
         month: "long",
         day: "numeric",
-      })} 16:30時点`
+      })} 取引終了後時点`
     : null;
 
   return (
