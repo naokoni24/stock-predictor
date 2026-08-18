@@ -39,6 +39,11 @@ PREVIOUS_SIGNAL_LIMIT = 50
 # prices/signalsのupsertをまとめて送る際の1リクエストあたりの最大行数
 UPSERT_CHUNK_SIZE = 500
 
+# 東証の取引終了時刻(JST)。この時刻より前にバッチが実行された場合、
+# yfinanceが返す当日分のデータは取引時間中の暫定値(未確定の終値)であり
+# 実際の当日終値とは一致しないため、当日分を除外して前営業日までのデータを使う。
+MARKET_CLOSE_HOUR_JST = 15
+
 
 def upsert_in_chunks(table, rows, *, on_conflict=None):
     """大量行を複数リクエストに分けてupsertし、銘柄ごとの個別リクエストを避ける"""
@@ -527,10 +532,17 @@ def main():
         hist = hist.reset_index()
         hist["date"] = hist["Date"].dt.date
 
-        # yfinanceが当日分の未確定(寄り付き前)データを返すことがあるため、
-        # 日本時間の本日より先の日付の行は除外する
-        today_jst = datetime.now(timezone(timedelta(hours=9))).date()
-        hist = hist[hist["date"] <= today_jst].reset_index(drop=True)
+        # yfinanceが当日分の未確定データ(取引時間中の暫定値、寄り付き前の前日値など)を
+        # 返すことがあるため、日本時間の本日より先の日付の行は除外する。
+        # さらに、東証の取引終了時刻(15:00 JST)より前にバッチが実行された場合は
+        # 当日分そのものが未確定(まだ当日終値が確定していない)ため、当日分も除外する。
+        # これを怠ると、取引時間中の暫定値が「当日終値」として保存され、
+        # ポートフォリオの評価額が実際の当日終値と一致しなくなる。
+        now_jst = datetime.now(timezone(timedelta(hours=9)))
+        cutoff_date = now_jst.date()
+        if now_jst.hour < MARKET_CLOSE_HOUR_JST:
+            cutoff_date -= timedelta(days=1)
+        hist = hist[hist["date"] <= cutoff_date].reset_index(drop=True)
         if hist.empty:
             print(f"skip {ticker}: no valid data")
             continue
