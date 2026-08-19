@@ -36,6 +36,12 @@ type Row = {
   changePct?: number | null;
 };
 
+type OutcomeRow = {
+  outcome_date: string;
+  net_return: number;
+  model_version: string;
+};
+
 function isMissingMlExplanationColumn(error: { message?: string | null; code?: string | null } | null) {
   const message = error?.message ?? "";
   return error?.code === "PGRST204" || message.includes("ml_threshold") || message.includes("ml_block_reasons");
@@ -129,6 +135,40 @@ async function fetchWatchlists() {
   return {
     buy: { rows: buyRows, error },
     sell: { rows: sellRows, error },
+  };
+}
+
+function isMissingOutcomeTable(error: { message?: string | null; code?: string | null } | null) {
+  return error?.code === "PGRST205" || (error?.message ?? "").includes("signal_outcomes");
+}
+
+function summarizeOutcomes(rows: OutcomeRow[], days: number) {
+  const since = new Date();
+  since.setDate(since.getDate() - days);
+  const sinceDate = since.toISOString().slice(0, 10);
+  const selected = rows.filter((row) => row.outcome_date >= sinceDate);
+  if (selected.length === 0) return null;
+  const netReturn = selected.reduce((sum, row) => sum + row.net_return, 0) / selected.length;
+  return {
+    trades: selected.length,
+    winRate: selected.filter((row) => row.net_return > 0).length / selected.length,
+    netReturn,
+  };
+}
+
+async function fetchLivePerformance() {
+  const { data, error } = await supabase
+    .from("signal_outcomes")
+    .select("outcome_date, net_return, model_version")
+    .order("outcome_date", { ascending: false })
+    .limit(500);
+  if (isMissingOutcomeTable(error)) return { recent: null, longer: null, latestModel: null, error: null };
+  const rows = (data ?? []) as OutcomeRow[];
+  return {
+    recent: summarizeOutcomes(rows, 30),
+    longer: summarizeOutcomes(rows, 90),
+    latestModel: rows[0]?.model_version ?? null,
+    error,
   };
 }
 
@@ -287,7 +327,11 @@ const SENTIMENT_COLOR: Record<string, string> = {
 };
 
 export default async function Home() {
-  const [{ buy, sell }, news] = await Promise.all([fetchWatchlists(), fetchNews()]);
+  const [{ buy, sell }, news, performance] = await Promise.all([
+    fetchWatchlists(),
+    fetchNews(),
+    fetchLivePerformance(),
+  ]);
 
   const topPick = buy.rows[0];
 
@@ -429,6 +473,39 @@ export default async function Home() {
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2 text-base">
+                <Sparkles className="size-4 text-chart-2" />
+                AI本番成績
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              {performance.error && (
+                <p className="text-bearish text-sm">データ取得エラー: {performance.error.message}</p>
+              )}
+              {!performance.error && !performance.recent && (
+                <p className="text-sm leading-relaxed text-muted-foreground">
+                  AI買い候補を5営業日後に評価します。最初の成績は5営業日後から表示されます。
+                </p>
+              )}
+              {performance.recent && (
+                <div className="flex flex-col gap-3">
+                  <PerformanceRow label="直近30日" stats={performance.recent} />
+                  {performance.longer && <PerformanceRow label="直近90日" stats={performance.longer} />}
+                  <p className="text-xs leading-relaxed text-muted-foreground">
+                    シグナル日終値から5営業日後終値まで。往復コスト0.2%を控除した参考値です。
+                  </p>
+                  {performance.latestModel && (
+                    <p className="text-[10px] text-muted-foreground break-all">
+                      モデル世代: {performance.latestModel}
+                    </p>
+                  )}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-base">
                 <Newspaper className="size-4" />
                 マーケットニュース
               </CardTitle>
@@ -469,6 +546,27 @@ export default async function Home() {
             </CardContent>
           </Card>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function PerformanceRow({
+  label,
+  stats,
+}: {
+  label: string;
+  stats: { trades: number; winRate: number; netReturn: number };
+}) {
+  const positive = stats.netReturn >= 0;
+  return (
+    <div className="flex items-center justify-between gap-3 text-sm">
+      <span className="text-muted-foreground">{label} ({stats.trades}件)</span>
+      <div className="flex items-center gap-3 text-right tabular-nums">
+        <span>勝率 {(stats.winRate * 100).toFixed(0)}%</span>
+        <span className={cn("font-semibold", positive ? "text-bullish" : "text-bearish")}>
+          平均 {positive ? "+" : ""}{(stats.netReturn * 100).toFixed(2)}%
+        </span>
       </div>
     </div>
   );

@@ -13,6 +13,7 @@
 必要な環境変数: SUPABASE_URL, SUPABASE_SERVICE_KEY
 """
 
+import hashlib
 import math
 import os
 import signal
@@ -59,7 +60,7 @@ def upsert_signals_with_schema_fallback(sb, rows: list[dict]):
         upsert_in_chunks(sb.table("signals"), rows, on_conflict="ticker,date")
     except Exception as exc:
         message = str(exc)
-        explanation_columns = ("ml_threshold", "ml_block_reasons")
+        explanation_columns = ("ml_threshold", "ml_block_reasons", "model_version")
         if not any(column in message for column in explanation_columns):
             raise
         print(
@@ -80,6 +81,19 @@ def load_ml_model():
     except FileNotFoundError:
         print("model.pkl not found, skip ML prediction")
         return None
+
+
+def get_model_version(model_bundle) -> str | None:
+    """保存済みモデルの内容を識別する短いバージョン文字列を返す。"""
+    if model_bundle is None:
+        return None
+    try:
+        with open(MODEL_PATH, "rb") as model_file:
+            digest = hashlib.sha256(model_file.read()).hexdigest()[:12]
+    except OSError:
+        return None
+    feature_version = str(model_bundle.get("feature_version", "unknown"))
+    return f"{feature_version}@{digest}"
 
 
 # ニュースセンチメントによるスコア補正の重み(±この割合だけml_scoreを増減)
@@ -566,6 +580,7 @@ def main():
     key = os.environ["SUPABASE_SERVICE_KEY"]
     sb = create_client(url, key)
     model_bundle = load_ml_model()
+    model_version = get_model_version(model_bundle)
     nikkei = None
     if model_bundle is not None:
         from train_model import get_nikkei_returns
@@ -710,6 +725,7 @@ def main():
                 "ml_score": ml_score,
                 "ml_threshold": ml_threshold,
                 "ml_block_reasons": ml_block_reasons,
+                "model_version": model_version,
             }
         )
 

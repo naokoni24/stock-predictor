@@ -57,6 +57,7 @@ SUPABASE_SERVICE_KEY=...
 - `scripts/fetch_news.py`: Google News RSSからニュース取得・簡易センチメント分析。
 - `scripts/train_model.py`: MLモデルの月次再学習(RandomForest / GradientBoosting / LightGBMのVotingClassifier)。
 - `scripts/backtest_ml.py`: 月次walk-forward方式のバックテスト。
+- `scripts/evaluate_signal_outcomes.py`: AI買い候補を、シグナル日終値から5営業日後終値で本番評価し、コスト控除後の実績を保存。
 - `scripts/apply_retention.py`: prices/signals/newsの保持期間ルールに基づく古いデータの削除。
 
 ### macOSでLightGBMがロードできない場合
@@ -76,7 +77,7 @@ scripts/venv/bin/pip install lightgbm --no-binary lightgbm \
 
 ## GitHub Actions
 
-- **daily-signals**: 毎日実行。株価・テクニカル指標・シグナル・ニュースを更新し、データ保持期間ルールを適用する。
+- **daily-signals**: 毎日実行。株価・テクニカル指標・シグナルを更新し、5営業日後に確定したAI買い候補の本番実績を保存してから、ニュース更新・データ保持期間ルールを適用する。
 - **monthly-retrain**: 月1回実行。MLモデルを再学習し、`scripts/model.pkl` に差分があればbotがcommitする。
 
 いずれも `workflow_dispatch` で手動実行できる。必要なSecrets: `SUPABASE_URL`、`SUPABASE_SERVICE_KEY`。
