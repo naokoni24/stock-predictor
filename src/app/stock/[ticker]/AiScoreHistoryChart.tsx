@@ -35,12 +35,12 @@ export default function AiScoreHistoryChart({ data }: { data: ScorePoint[] }) {
           <YAxis
             domain={[0, 100]}
             tick={{ fontSize: 10, fill: "var(--color-muted-foreground)" }}
-            tickFormatter={(v: number) => `${v}%`}
+            tickFormatter={(v: number) => `${v}`}
             width={40}
           />
           <ReferenceLine y={50} stroke="var(--color-muted-foreground)" strokeDasharray="3 3" />
           <Tooltip
-            formatter={(value) => [`${value}%`, "上昇確率"]}
+            formatter={(value) => [`${value}`, "AI相対スコア"]}
             contentStyle={{
               backgroundColor: "var(--color-card)",
               border: "1px solid var(--color-border)",

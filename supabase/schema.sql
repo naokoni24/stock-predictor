@@ -30,6 +30,10 @@ create table if not exists signals (
   bb_lower numeric,
   signal text,           -- 'buy_candidate' | 'sell_candidate' | 'hold' | null
   score numeric,         -- おすすめ度ランキング用スコア
+  ml_signal text,        -- MLによる買い候補/様子見
+  ml_score numeric,      -- 予測確率ではなく、モデル内での相対スコア(0〜1)
+  ml_threshold numeric,  -- 当日に業種・相場環境を反映して適用したAI買いしきい値
+  ml_block_reasons text[], -- AI買いを見送った理由
   primary key (ticker, date)
 );
 

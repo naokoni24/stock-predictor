@@ -23,6 +23,35 @@ function IndicatorRow({ label, value }: { label: string; value: string }) {
   );
 }
 
+function isMissingMlExplanationColumn(error: { message?: string | null; code?: string | null } | null) {
+  const message = error?.message ?? "";
+  return error?.code === "PGRST204" || message.includes("ml_threshold") || message.includes("ml_block_reasons");
+}
+
+async function fetchLatestSignal(ticker: string) {
+  let result = await supabase
+    .from("signals")
+    .select(
+      "close, sma25, sma75, rsi14, macd, macd_signal, bb_upper, bb_lower, signal, score, ml_signal, ml_score, ml_threshold, ml_block_reasons, date"
+    )
+    .eq("ticker", ticker)
+    .order("date", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  // 手動SQLの適用前も銘柄詳細を表示できるよう、旧カラム構成へフォールバックする。
+  if (isMissingMlExplanationColumn(result.error)) {
+    result = await supabase
+      .from("signals")
+      .select("close, sma25, sma75, rsi14, macd, macd_signal, bb_upper, bb_lower, signal, score, ml_signal, ml_score, date")
+      .eq("ticker", ticker)
+      .order("date", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+  }
+  return result;
+}
+
 export default async function StockDetail({
   params,
 }: {
@@ -42,15 +71,7 @@ export default async function StockDetail({
         .eq("ticker", ticker)
         .gte("date", historySinceDate)
         .order("date", { ascending: true }),
-      supabase
-        .from("signals")
-        .select(
-          "close, sma25, sma75, rsi14, macd, macd_signal, bb_upper, bb_lower, signal, score, ml_signal, ml_score, date"
-        )
-        .eq("ticker", ticker)
-        .order("date", { ascending: false })
-        .limit(1)
-        .maybeSingle(),
+      fetchLatestSignal(ticker),
       supabase
         .from("signals")
         .select("date, ml_score")
@@ -96,7 +117,8 @@ export default async function StockDetail({
     latest && prev && prev.close ? ((latest.close - prev.close) / prev.close) * 100 : null;
 
   const aiScore = signal?.ml_score ?? null;
-  const isBullish = (aiScore ?? 0.5) >= 0.5;
+  const aiThreshold = signal?.ml_threshold ?? null;
+  const isBullish = aiScore != null && (aiThreshold == null || aiScore >= aiThreshold);
   const recommendation =
     signal?.signal === "buy_candidate" && signal?.ml_signal === "buy_candidate"
       ? "buy"
@@ -123,7 +145,12 @@ export default async function StockDetail({
       else parts.push(`RSIは${signal.rsi14.toFixed(1)}で中立圏です。`);
     }
     if (aiScore != null) {
-      parts.push(`AIモデルは今後の上昇確率を${(aiScore * 100).toFixed(0)}%と予測しています。`);
+      const scoreText = `AI相対スコアは${(aiScore * 100).toFixed(0)}です`;
+      parts.push(
+        aiThreshold != null
+          ? `${scoreText}（買いしきい値${(aiThreshold * 100).toFixed(0)}）。`
+          : `${scoreText}。`
+      );
     }
     if (signal?.sma25 != null && signal?.sma75 != null && signal?.close != null) {
       if (signal.close > signal.sma25 && signal.sma25 > signal.sma75) {
@@ -198,7 +225,7 @@ export default async function StockDetail({
           {scoreHistory && scoreHistory.length > 0 && (
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">AI予測スコアの推移</CardTitle>
+                <CardTitle className="text-base">AI相対スコアの推移</CardTitle>
               </CardHeader>
               <CardContent>
                 <AiScoreHistoryChart data={[...scoreHistory].reverse()} />
@@ -298,9 +325,9 @@ export default async function StockDetail({
 
               <div className="flex flex-col gap-1.5">
                 <div className="flex items-center justify-between text-sm">
-                  <span className="text-muted-foreground">上昇確率(AI予測)</span>
+                  <span className="text-muted-foreground">AI相対スコア</span>
                   <span className={cn("font-semibold tabular-nums", isBullish ? "text-bullish" : "text-bearish")}>
-                    {aiScore != null ? `${(aiScore * 100).toFixed(0)}%` : "ー"}
+                    {aiScore != null ? `${(aiScore * 100).toFixed(0)}` : "ー"}
                   </span>
                 </div>
                 {aiScore != null && (
@@ -313,6 +340,22 @@ export default async function StockDetail({
                 )}
               </div>
 
+              {aiThreshold != null && (
+                <div className="flex items-center justify-between text-sm">
+                  <span className="text-muted-foreground">AI買いしきい値</span>
+                  <span className="font-semibold tabular-nums">{(aiThreshold * 100).toFixed(0)}</span>
+                </div>
+              )}
+
+              {signal?.ml_block_reasons && signal.ml_block_reasons.length > 0 && (
+                <div className="rounded-lg border border-border bg-secondary/50 p-3">
+                  <p className="text-xs font-medium text-muted-foreground">AI買いを見送った理由</p>
+                  <ul className="mt-1.5 list-disc space-y-1 pl-4 text-xs leading-relaxed text-muted-foreground">
+                    {signal.ml_block_reasons.map((reason: string) => <li key={reason}>{reason}</li>)}
+                  </ul>
+                </div>
+              )}
+
               <div className="flex items-center justify-between text-sm">
                 <span className="text-muted-foreground">テクニカルスコア</span>
                 <span className="font-semibold tabular-nums">{signal?.score ?? "ー"}</span>
@@ -324,6 +367,9 @@ export default async function StockDetail({
                 <p className="text-xs font-medium text-muted-foreground mb-1.5">AI解説</p>
                 <p className="text-sm leading-relaxed">
                   {explanation || "現在分析中のデータがありません。"}
+                </p>
+                <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                  AI相対スコアは上昇確率ではなく、同じモデルで評価した銘柄の中での相対的な強さを示します。
                 </p>
               </div>
             </CardContent>

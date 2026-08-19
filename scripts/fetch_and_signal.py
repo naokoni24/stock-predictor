@@ -53,6 +53,26 @@ def upsert_in_chunks(table, rows, *, on_conflict=None):
         query.execute()
 
 
+def upsert_signals_with_schema_fallback(sb, rows: list[dict]):
+    """説明用カラムのSQL未適用時も、日次バッチ全体を止めずに旧形式で保存する。"""
+    try:
+        upsert_in_chunks(sb.table("signals"), rows, on_conflict="ticker,date")
+    except Exception as exc:
+        message = str(exc)
+        explanation_columns = ("ml_threshold", "ml_block_reasons")
+        if not any(column in message for column in explanation_columns):
+            raise
+        print(
+            "AI判定根拠カラムが未追加のため旧形式で保存します。"
+            "Supabase SQL Editorでsupabase/policies_add_ml_explanations.sqlを実行してください。"
+        )
+        legacy_rows = [
+            {key: value for key, value in row.items() if key not in explanation_columns}
+            for row in rows
+        ]
+        upsert_in_chunks(sb.table("signals"), legacy_rows, on_conflict="ticker,date")
+
+
 def load_ml_model():
     """学習済みモデルを読み込む。存在しない場合はNoneを返す(ML推論をスキップ)"""
     try:
@@ -89,10 +109,17 @@ def get_news_sentiment(sb, tickers: list[str], days: int = 7) -> dict[str, float
     return {ticker: sum(values) / len(values) for ticker, values in scores.items()}
 
 
-def predict_ml(model_bundle, hist, nikkei, sector=None, feature_df=None, news_sentiment: float = 0.0) -> tuple[str | None, float | None]:
-    """株価履歴からML予測(ml_signal/ml_score)を計算"""
+def predict_ml(
+    model_bundle,
+    hist,
+    nikkei,
+    sector=None,
+    feature_df=None,
+    news_sentiment: float = 0.0,
+) -> tuple[str | None, float | None, float | None, list[str] | None]:
+    """株価履歴からML予測と、判定に使ったしきい値・見送り理由を計算する。"""
     if model_bundle is None:
-        return None, None
+        return None, None, None, None
 
     from train_model import (
         adjusted_ml_buy_threshold,
@@ -112,7 +139,7 @@ def predict_ml(model_bundle, hist, nikkei, sector=None, feature_df=None, news_se
 
     feature_values = row[model_bundle["features"]]
     if feature_values.isna().any() or not np.isfinite(feature_values.to_numpy(dtype=float)).all():
-        return None, None
+        return None, None, None, None
 
     features = pd.DataFrame([row[model_bundle["features"]]])
 
@@ -152,10 +179,12 @@ def predict_ml(model_bundle, hist, nikkei, sector=None, feature_df=None, news_se
         block_reasons.append(
             f"アンサンブル不一致が大きい ({disagreement:.3f} > {float(max_disagreement):.3f})"
         )
+    if score < threshold:
+        block_reasons.insert(0, "AI相対スコアが買いしきい値未満")
     signal = "buy_candidate" if score >= threshold and not block_reasons else "hold"
-    if score >= threshold and block_reasons:
+    if block_reasons:
         print(f"ML buy blocked: reasons={','.join(block_reasons)} score={score:.4f} threshold={threshold:.2f}")
-    return signal, round(score, 4)
+    return signal, round(score, 4), round(threshold, 4), block_reasons
 
 
 def limit_ml_buy_candidates(signal_rows: list[dict], max_candidates: int) -> int:
@@ -172,6 +201,9 @@ def limit_ml_buy_candidates(signal_rows: list[dict], max_candidates: int) -> int
     )
     for index, _ in candidates[max_candidates:]:
         signal_rows[index]["ml_signal"] = "hold"
+        reasons = signal_rows[index].get("ml_block_reasons") or []
+        reasons.append(f"日次AI買い候補の上位{max_candidates}件を超過")
+        signal_rows[index]["ml_block_reasons"] = reasons
     return max(0, len(candidates) - max_candidates)
 
 # 対象銘柄(ティッカー: 名称)。必要に応じて追加・holdingsテーブルと連動させる
@@ -639,7 +671,7 @@ def main():
         latest = hist.iloc[-1]
         market_date = latest["date"]
         signal, score = make_signal(latest)
-        ml_signal, ml_score = predict_ml(
+        ml_signal, ml_score, ml_threshold, ml_block_reasons = predict_ml(
             model_bundle,
             hist,
             nikkei,
@@ -656,6 +688,9 @@ def main():
                 if -EARNINGS_BLOCK_DAYS_AFTER <= days_to_earnings <= EARNINGS_BLOCK_DAYS_BEFORE:
                     print(f"ML buy blocked: 決算前後 {earnings_date} (D{days_to_earnings:+d}) {ticker}")
                     ml_signal = "hold"
+                    ml_block_reasons = (ml_block_reasons or []) + [
+                        f"決算前後のため見送り ({earnings_date.isoformat()})"
+                    ]
 
         all_signal_rows.append(
             {
@@ -673,6 +708,8 @@ def main():
                 "score": score,
                 "ml_signal": ml_signal,
                 "ml_score": ml_score,
+                "ml_threshold": ml_threshold,
+                "ml_block_reasons": ml_block_reasons,
             }
         )
 
@@ -693,7 +730,7 @@ def main():
                 f"({removed}件を除外)"
             )
 
-    upsert_in_chunks(sb.table("signals"), all_signal_rows, on_conflict="ticker,date")
+    upsert_signals_with_schema_fallback(sb, all_signal_rows)
 
     update_fundamentals(sb, all_tickers, jp_sectors, signal_results)
 

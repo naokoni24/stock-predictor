@@ -29,17 +29,41 @@ type Row = {
   score: number | null;
   ml_signal: string | null;
   ml_score: number | null;
+  ml_threshold: number | null;
+  ml_block_reasons: string[] | null;
   stockName?: string;
   sector?: string;
   changePct?: number | null;
 };
 
+function isMissingMlExplanationColumn(error: { message?: string | null; code?: string | null } | null) {
+  const message = error?.message ?? "";
+  return error?.code === "PGRST204" || message.includes("ml_threshold") || message.includes("ml_block_reasons");
+}
+
 async function fetchWatchlists() {
-  const { data: signals, error } = await supabase
+  const initialResult = await supabase
     .from("signals")
-    .select("ticker, date, close, rsi14, signal, score, ml_signal, ml_score, stocks(name, sector)")
+    .select("ticker, date, close, rsi14, signal, score, ml_signal, ml_score, ml_threshold, ml_block_reasons, stocks(name, sector)")
     .order("date", { ascending: false })
     .limit(800);
+  let signals = initialResult.data;
+  let error = initialResult.error;
+
+  // SQL適用前の一時的な旧スキーマでも、既存のウォッチリスト表示を止めない。
+  if (isMissingMlExplanationColumn(error)) {
+    const legacyResult = await supabase
+      .from("signals")
+      .select("ticker, date, close, rsi14, signal, score, ml_signal, ml_score, stocks(name, sector)")
+      .order("date", { ascending: false })
+      .limit(800);
+    signals = legacyResult.data?.map((row) => ({
+      ...row,
+      ml_threshold: null,
+      ml_block_reasons: null,
+    })) ?? null;
+    error = legacyResult.error;
+  }
 
   // 銘柄ごとに最新日のシグナルのみを残す(買い/売り候補どちらのタブでも同じ最新日を使う)。
   // yfinanceが当日終値をまだ確定配信していない日はclose/signalがnullで保存されるため、
@@ -125,28 +149,29 @@ function ChangeBadge({ value }: { value: number | null | undefined }) {
   );
 }
 
-function AiScoreBar({ score }: { score: number | null | undefined }) {
+function AiScoreBar({ score, threshold }: { score: number | null | undefined; threshold?: number | null }) {
   if (score == null) return null;
   const pct = Math.round(score * 100);
+  const isEligible = threshold == null || score >= threshold;
   return (
     <div className="flex items-center gap-2 w-full max-w-48">
       <div className="h-1.5 flex-1 rounded-full bg-secondary overflow-hidden">
         <div
           className={cn(
             "h-full rounded-full",
-            pct >= 50 ? "bg-bullish" : "bg-bearish"
+            isEligible ? "bg-bullish" : "bg-bearish"
           )}
           style={{ width: `${pct}%` }}
         />
       </div>
       <span className="text-xs font-medium tabular-nums text-muted-foreground w-9 text-right">
-        {pct}%
+        {pct}
       </span>
     </div>
   );
 }
 
-function aiSentimentLabel(score: number): string {
+function aiScoreLabel(score: number): string {
   if (score < 0.2) return "非常に弱気";
   if (score < 0.35) return "弱気";
   if (score < 0.45) return "やや弱気";
@@ -171,7 +196,7 @@ function WatchlistRow({ s, signalType }: { s: Row; signalType: string }) {
         {signalType === "buy_candidate" && s.ml_score != null && (
           s.ml_signal === "buy_candidate" ? (
             <span className="text-[10px] text-bullish">
-              ※AI予測も買いを示しています
+              ※AI相対スコアも買い条件を満たしています
             </span>
           ) : (
             <span
@@ -180,7 +205,7 @@ function WatchlistRow({ s, signalType }: { s: Row; signalType: string }) {
                 s.ml_score < 0.45 ? "text-bearish" : "text-muted-foreground"
               )}
             >
-              ※AI予測は{aiSentimentLabel(s.ml_score)}です
+              ※AI相対スコアは{aiScoreLabel(s.ml_score)}です
             </span>
           )
         )}
@@ -193,7 +218,7 @@ function WatchlistRow({ s, signalType }: { s: Row; signalType: string }) {
 
       {signalType === "buy_candidate" && (
         <div className="hidden sm:flex flex-1 items-center justify-center self-center">
-          <AiScoreBar score={s.ml_score} />
+          <AiScoreBar score={s.ml_score} threshold={s.ml_threshold} />
         </div>
       )}
 
@@ -217,7 +242,7 @@ function WatchlistRow({ s, signalType }: { s: Row; signalType: string }) {
           )}
           {signalType === "buy_candidate" && (
             <div className="sm:hidden">
-              <AiScoreBar score={s.ml_score} />
+              <AiScoreBar score={s.ml_score} threshold={s.ml_threshold} />
             </div>
           )}
         </div>
@@ -359,15 +384,20 @@ export default async function Home() {
                   </div>
 
                   <div className="flex items-center justify-between">
-                    <span className="text-sm text-muted-foreground">AI上昇期待度</span>
+                    <span className="text-sm text-muted-foreground">AI相対スコア</span>
                     {topPick.ml_score != null ? (
                       <span className="font-semibold tabular-nums text-bullish">
-                        {(topPick.ml_score * 100).toFixed(0)}%
+                        {(topPick.ml_score * 100).toFixed(0)}
                       </span>
                     ) : (
                       <span className="text-sm text-muted-foreground">ー</span>
                     )}
                   </div>
+                  {topPick.ml_threshold != null && (
+                    <p className="text-xs text-muted-foreground -mt-2">
+                      買いしきい値 {Math.round(topPick.ml_threshold * 100)}
+                    </p>
+                  )}
 
                   <div className="flex items-center justify-between">
                     <span className="text-sm text-muted-foreground">テクニカルスコア</span>
@@ -380,6 +410,7 @@ export default async function Home() {
                       : "テクニカル指標に基づき買い候補として検出されています。"}
                     {" "}
                     RSI {topPick.rsi14?.toFixed(1) ?? "ー"}。
+                    {" AI相対スコアは確率ではなく、同モデル内での相対的な強さです。"}
                   </div>
 
                   <Link
