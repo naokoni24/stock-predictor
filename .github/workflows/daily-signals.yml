@@ -9,6 +9,9 @@ on:
     # なお、直近の実行実績ではGitHub Actionsのスケジュール遅延は30〜40分程度。
     # scripts/fetch_and_signal.py側にも取引終了前は当日分を除外する安全策を追加済み。
     - cron: "30 6 * * *"
+    # 通常更新で終値が欠損・未更新だった銘柄だけを18:45 JST (UTC 09:45) に再取得する。
+    # 同じ全銘柄処理を繰り返さず、GitHub Actions無料枠の消費を抑える。
+    - cron: "45 9 * * *"
   workflow_dispatch: {}
 
 jobs:
@@ -35,21 +38,25 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          REPAIR_MISSING_CLOSES_ONLY: ${{ github.event.schedule == '45 9 * * *' && '1' || '0' }}
         run: python scripts/fetch_and_signal.py
 
       - name: Evaluate live AI signal outcomes
+        if: github.event.schedule != '45 9 * * *'
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: python scripts/evaluate_signal_outcomes.py
 
       - name: Fetch market news
+        if: github.event.schedule != '45 9 * * *'
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: python scripts/fetch_news.py
 
       - name: Apply retention policy
+        if: github.event.schedule != '45 9 * * *'
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}

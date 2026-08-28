@@ -1,4 +1,5 @@
 yfinance
+jpholiday
 pandas
 supabase
 xlrd
