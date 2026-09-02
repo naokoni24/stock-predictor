@@ -38,7 +38,7 @@ create table if not exists signals (
   primary key (ticker, date)
 );
 
--- 本番AI買い候補の確定実績(シグナル日終値から5営業日後終値)
+-- 本番AI買い候補の確定実績(翌営業日始値約定、8%損切り、5営業日後始値決済、超過リターン)
 create table if not exists signal_outcomes (
   ticker text not null,
   signal_date date not null,
@@ -51,6 +51,13 @@ create table if not exists signal_outcomes (
   ml_threshold numeric,
   model_version text not null default 'legacy',
   sector text,
+  entry_date date,
+  entry_open numeric,
+  exit_open numeric,
+  exit_reason text,
+  benchmark_return numeric,
+  excess_return numeric,
+  evaluation_version text,
   primary key (ticker, signal_date),
   foreign key (ticker, signal_date) references signals(ticker, date) on delete cascade
 );

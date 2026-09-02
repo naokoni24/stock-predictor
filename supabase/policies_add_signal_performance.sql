@@ -32,3 +32,13 @@ drop policy if exists "public read signal outcomes" on signal_outcomes;
 create policy "public read signal outcomes"
 on signal_outcomes for select
 using (true);
+
+-- 2026-09: 学習/バックテストと本番実績を同じ約定・評価条件にそろえるための拡張。
+-- 既存行は日次バッチが直近45日分を新条件で再計算して更新する。
+alter table signal_outcomes add column if not exists entry_date date;
+alter table signal_outcomes add column if not exists entry_open numeric;
+alter table signal_outcomes add column if not exists exit_open numeric;
+alter table signal_outcomes add column if not exists exit_reason text;
+alter table signal_outcomes add column if not exists benchmark_return numeric;
+alter table signal_outcomes add column if not exists excess_return numeric;
+alter table signal_outcomes add column if not exists evaluation_version text;

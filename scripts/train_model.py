@@ -137,6 +137,17 @@ PROMOTION_TEST_SUB_PERIODS = 3
 PROMOTION_MIN_POSITIVE_PERIOD_RATIO = 0.5  # 過半数(3期間なら2/3以上)がプラスであること
 PROMOTION_MAX_NEGATIVE_PERIOD_RETURN = -0.01  # 1期間の平均が-1%を下回ったら極端なマイナスとみなす
 
+# 昇格判定を単一のテスト期間へ過適合させないための拡大型walk-forward検証。
+# 各foldでは、特徴量選択・スコア較正・しきい値類を必ずそのfoldの検証期間以前だけで決め、
+# 後続の未使用期間を評価する。月次GitHub Actionsの実行時間を抑えるため3foldとする。
+WALK_FORWARD_FOLDS = 3
+WALK_FORWARD_VALIDATION_DAYS = 40
+WALK_FORWARD_MIN_TRAIN_DATES = 120
+WALK_FORWARD_MIN_POSITIVE_FOLD_RATIO = 2 / 3
+WALK_FORWARD_MIN_TOTAL_TRADES = 60
+# foldごとに未来へ漏らさずモデル形状を選ぶための試行数。本番Optunaより小さくして無料枠を守る。
+WALK_FORWARD_OPTUNA_N_TRIALS = 8
+
 # 特徴量選択: 正規化gain重要度がこの割合未満の特徴量を除外する(過学習・ノイズ削減)。
 # 環境変数 SELECT_FEATURES=0 で無効化できる(A/B比較用)。
 MIN_FEATURE_IMPORTANCE = 0.001
@@ -924,10 +935,207 @@ def evaluate_test_period_stability(
     return sub_periods
 
 
+def run_walk_forward_validation(
+    dataset: pd.DataFrame,
+    all_feature_columns: list[str],
+) -> list[dict]:
+    """未来を使わない拡大型walk-forwardで候補パイプラインの安定性を検証する。
+
+    各foldでは、それ以前のデータだけを用いてモデル形状・特徴量選択・較正・
+    しきい値/業種/局面/不一致/日次上限を再選択する。したがってfoldのテスト期間は、
+    モデル・シグナル選別ロジックの両方にとって完全な未使用期間になる。
+    """
+    working = dataset.copy()
+    working["date"] = pd.to_datetime(working["date"]).dt.normalize()
+    unique_dates = np.array(sorted(working["date"].unique()))
+    required_dates = (
+        WALK_FORWARD_MIN_TRAIN_DATES + WALK_FORWARD_VALIDATION_DAYS + LABEL_LOOKAHEAD_DAYS * 2
+    )
+    if len(unique_dates) < required_dates + WALK_FORWARD_FOLDS:
+        print("walk-forward検証: 取引日不足のためスキップ")
+        return []
+
+    first_test_position = max(required_dates, int(len(unique_dates) * 0.55))
+    test_chunks = [chunk for chunk in np.array_split(unique_dates[first_test_position:], WALK_FORWARD_FOLDS) if len(chunk)]
+    results = []
+    print(f"\n拡大型walk-forward検証 ({len(test_chunks)}fold、各foldの設定は過去データのみで選択):")
+
+    for fold_number, test_dates in enumerate(test_chunks, start=1):
+        test_start_position = int(np.searchsorted(unique_dates, test_dates[0]))
+        val_end_position = test_start_position - LABEL_LOOKAHEAD_DAYS
+        val_start_position = val_end_position - WALK_FORWARD_VALIDATION_DAYS
+        train_end_position = val_start_position - LABEL_LOOKAHEAD_DAYS
+        if train_end_position < WALK_FORWARD_MIN_TRAIN_DATES or val_start_position < 0:
+            continue
+
+        train_dates = unique_dates[:train_end_position]
+        val_dates = unique_dates[val_start_position:val_end_position]
+        train_df = working[working["date"].isin(train_dates)].copy()
+        val_df = working[working["date"].isin(val_dates)].copy()
+        test_df = working[working["date"].isin(test_dates)].copy()
+        if train_df.empty or val_df.empty or test_df.empty or train_df["label"].nunique() < 2:
+            continue
+
+        train_age_days = (train_df["date"].max() - train_df["date"]).dt.days.to_numpy()
+        sample_weight = (
+            compute_sample_weight(class_weight="balanced", y=train_df["label"])
+            * (0.5 ** (train_age_days / RECENCY_HALFLIFE_DAYS))
+        )
+        selected_features = select_features(
+            train_df[all_feature_columns], train_df["label"], all_feature_columns, sample_weight
+        )
+        val_blocked = val_df.apply(is_ml_buy_blocked, axis=1).to_numpy(dtype=bool)
+        val_thresholds = np.array(
+            [adjusted_ml_buy_threshold(DEFAULT_ML_BUY_THRESHOLD, row) for _, row in val_df.iterrows()]
+        )
+
+        def fold_trial_params(trial: optuna.Trial) -> tuple[dict, dict, dict]:
+            """各foldで検証期間以前のデータだけを使って探索するモデル形状。"""
+            return (
+                {
+                    "n_estimators": trial.suggest_int("rf_n_estimators", 80, 200),
+                    "max_depth": trial.suggest_int("rf_max_depth", 3, 7),
+                    "min_samples_leaf": trial.suggest_int("rf_min_samples_leaf", 10, 50),
+                },
+                {
+                    "n_estimators": trial.suggest_int("gb_n_estimators", 50, 150),
+                    "max_depth": trial.suggest_int("gb_max_depth", 2, 4),
+                    "min_samples_leaf": trial.suggest_int("gb_min_samples_leaf", 10, 50),
+                    "learning_rate": trial.suggest_float("gb_learning_rate", 0.02, 0.2, log=True),
+                },
+                {
+                    "n_estimators": trial.suggest_int("lgbm_n_estimators", 100, 300),
+                    "max_depth": trial.suggest_int("lgbm_max_depth", 3, 7),
+                    "min_child_samples": trial.suggest_int("lgbm_min_child_samples", 10, 50),
+                    "learning_rate": trial.suggest_float("lgbm_learning_rate", 0.02, 0.2, log=True),
+                    "num_leaves": trial.suggest_int("lgbm_num_leaves", 15, 48),
+                },
+            )
+
+        def fold_objective(trial: optuna.Trial) -> float:
+            rf_params, gb_params, lgbm_params = fold_trial_params(trial)
+            trial_model = build_voting_model(
+                rf_params, gb_params, lgbm_params, seeds=ENSEMBLE_SEEDS[:1]
+            )
+            trial_model.fit(
+                train_df[selected_features], train_df["label"], sample_weight=sample_weight
+            )
+            calibration = np.percentile(
+                trial_model.predict_proba(train_df[selected_features])[:, 1], np.linspace(0, 100, 21)
+            )
+            val_scores = np.interp(
+                trial_model.predict_proba(val_df[selected_features])[:, 1],
+                calibration,
+                np.linspace(0, 1, 21),
+            )
+            selected = val_df["future_excess_return"].to_numpy()[
+                (val_scores >= val_thresholds) & ~val_blocked
+            ]
+            if selected.size == 0:
+                return float("-inf")
+            net = selected - TRANSACTION_COST
+            return float(
+                net.mean() + (net > 0).mean() * 0.005 + (net >= EXCESS_RETURN_TARGET).mean() * 0.005
+            )
+
+        fold_study = optuna.create_study(direction="maximize")
+        fold_study.optimize(fold_objective, n_trials=WALK_FORWARD_OPTUNA_N_TRIALS, show_progress_bar=False)
+        fold_best = fold_study.best_params
+        rf_params = {
+            "n_estimators": fold_best["rf_n_estimators"],
+            "max_depth": fold_best["rf_max_depth"],
+            "min_samples_leaf": fold_best["rf_min_samples_leaf"],
+        }
+        gb_params = {
+            "n_estimators": fold_best["gb_n_estimators"],
+            "max_depth": fold_best["gb_max_depth"],
+            "min_samples_leaf": fold_best["gb_min_samples_leaf"],
+            "learning_rate": fold_best["gb_learning_rate"],
+        }
+        lgbm_params = {
+            "n_estimators": fold_best["lgbm_n_estimators"],
+            "max_depth": fold_best["lgbm_max_depth"],
+            "min_child_samples": fold_best["lgbm_min_child_samples"],
+            "learning_rate": fold_best["lgbm_learning_rate"],
+            "num_leaves": fold_best["lgbm_num_leaves"],
+        }
+        # walk-forwardは評価専用のため、速度と再現性を優先して単一シードを使う。
+        # 本番候補はこの後に全シード平均で学習する。
+        model_factory = lambda: build_voting_model(
+            rf_params, gb_params, lgbm_params, seeds=ENSEMBLE_SEEDS[:1]
+        )
+        model = model_factory()
+        model.fit(train_df[selected_features], train_df["label"], sample_weight=sample_weight)
+
+        calibration_values, calibration_metadata = build_time_series_oof_calibration(
+            model_factory, train_df[selected_features], train_df["label"], train_df["date"]
+        )
+        if calibration_values is None:
+            calibration_values = np.percentile(
+                model.predict_proba(train_df[selected_features])[:, 1], np.linspace(0, 100, 21)
+            ).tolist()
+
+        val_scores = calibrate_scores(model.predict_proba(val_df[selected_features])[:, 1], calibration_values)
+        threshold, _ = optimize_ml_buy_threshold(
+            val_scores, val_df["future_excess_return"].to_numpy(), val_df, dates=val_df["date"]
+        )
+        sector_thresholds, _ = optimize_sector_thresholds(
+            threshold, val_scores, val_df["future_excess_return"].to_numpy(), val_df,
+            val_df["sector_label"], dates=val_df["date"],
+        )
+        regime_offsets, _ = optimize_market_regime_threshold_offsets(
+            threshold, val_scores, val_df["future_excess_return"].to_numpy(), val_df,
+            val_df["sector_label"], sector_thresholds, val_df["date"], MAX_DAILY_ML_BUY_CANDIDATES,
+        )
+        val_disagreements = ensemble_disagreement(model, val_df[selected_features])
+        disagreement_limit, _ = optimize_ensemble_disagreement(
+            val_scores, val_disagreements, val_df["future_excess_return"].to_numpy(), threshold,
+            val_df, val_df["sector_label"], sector_thresholds, val_df["date"],
+            MAX_DAILY_ML_BUY_CANDIDATES, regime_offsets,
+        )
+        max_daily_candidates, _ = optimize_max_daily_candidates(
+            val_scores, val_df["future_excess_return"].to_numpy(), threshold, val_df,
+            val_df["sector_label"], sector_thresholds, regime_offsets, val_df["date"],
+            disagreements=val_disagreements, max_ensemble_disagreement=disagreement_limit,
+        )
+
+        test_scores = calibrate_scores(model.predict_proba(test_df[selected_features])[:, 1], calibration_values)
+        test_eval = evaluate_threshold(
+            test_scores, test_df["future_excess_return"].to_numpy(), threshold, test_df,
+            test_df["sector_label"], sector_thresholds, regime_offsets, dates=test_df["date"],
+            max_daily_candidates=max_daily_candidates,
+            disagreements=ensemble_disagreement(model, test_df[selected_features]),
+            max_ensemble_disagreement=disagreement_limit,
+        )
+        result = {
+            "fold": fold_number,
+            "train_end": str(train_df["date"].max().date()),
+            "validation_start": str(val_df["date"].min().date()),
+            "validation_end": str(val_df["date"].max().date()),
+            "test_start": str(test_df["date"].min().date()),
+            "test_end": str(test_df["date"].max().date()),
+            "train_rows": int(len(train_df)),
+            "validation_rows": int(len(val_df)),
+            "test_rows": int(len(test_df)),
+            "selected_feature_count": int(len(selected_features)),
+            "optuna_best_value": float(fold_study.best_value),
+            "calibration_method": calibration_metadata["method"],
+            "evaluation": test_eval,
+        }
+        results.append(result)
+        print(
+            f"  fold{fold_number}: {result['test_start']}〜{result['test_end']} "
+            f"trades={test_eval['trades']} win_rate={test_eval['win_rate'] * 100:.1f}% "
+            f"avg_return={test_eval['avg_return'] * 100:+.2f}%"
+        )
+    return results
+
+
 def should_promote_candidate(
     candidate: dict,
     baseline: dict | None,
     candidate_test_sub_periods: list[dict] | None = None,
+    walk_forward_results: list[dict] | None = None,
 ) -> tuple[bool, str]:
     """再学習候補を本番モデルへ昇格させるかを決める。"""
     if candidate["avg_return"] < PROMOTION_MIN_AVG_RETURN:
@@ -955,6 +1163,22 @@ def should_promote_candidate(
                 f"(最悪期間avg_return={worst_period_return:+.4f} < "
                 f"{PROMOTION_MAX_NEGATIVE_PERIOD_RETURN:+.4f})"
             )
+
+    if not walk_forward_results or len(walk_forward_results) < WALK_FORWARD_FOLDS:
+        return False, "複数walk-forward検証を完了できなかったため昇格を見送り"
+    walk_forward_evaluations = [result["evaluation"] for result in walk_forward_results]
+    total_walk_forward_trades = sum(result["trades"] for result in walk_forward_evaluations)
+    positive_walk_forward_folds = sum(result["avg_return"] > 0 for result in walk_forward_evaluations)
+    if total_walk_forward_trades < WALK_FORWARD_MIN_TOTAL_TRADES:
+        return False, (
+            "walk-forwardの取引数不足 "
+            f"({total_walk_forward_trades} < {WALK_FORWARD_MIN_TOTAL_TRADES})"
+        )
+    if positive_walk_forward_folds / len(walk_forward_evaluations) < WALK_FORWARD_MIN_POSITIVE_FOLD_RATIO:
+        return False, (
+            "walk-forwardでプラスのfoldが不足 "
+            f"({positive_walk_forward_folds}/{len(walk_forward_evaluations)})"
+        )
 
     if baseline is None:
         # 絶対値基準・期間安定性を満たした場合のみ、比較対象がない初回モデルとして保存する。
@@ -2213,6 +2437,11 @@ def main():
                 f"avg_return={p['avg_return'] * 100:+.2f}%"
             )
 
+    walk_forward_results = run_walk_forward_validation(
+        dataset,
+        all_feature_columns,
+    )
+
     previous_eval = None
     previous_eval_error = None
     if previous_bundle is not None:
@@ -2228,7 +2457,9 @@ def main():
         else:
             print(f"既存モデル比較をスキップ: {previous_eval_error}")
 
-    promote, promotion_reason = should_promote_candidate(test_eval, previous_eval, test_sub_periods)
+    promote, promotion_reason = should_promote_candidate(
+        test_eval, previous_eval, test_sub_periods, walk_forward_results
+    )
     print(f"モデル昇格判定: {'昇格' if promote else '見送り'} — {promotion_reason}")
     print(
         f"\nテストデータでの最終評価(市場・業種に対する超過リターン、日次上位{max_daily_ml_buy_candidates}件、"
@@ -2339,6 +2570,18 @@ def main():
                 "reason": promotion_reason,
                 "candidate_test_eval": test_eval,
                 "candidate_test_sub_periods": test_sub_periods,
+                "walk_forward": {
+                    "folds": walk_forward_results,
+                    "config": {
+                        "folds": WALK_FORWARD_FOLDS,
+                        "validation_days": WALK_FORWARD_VALIDATION_DAYS,
+                        "min_train_dates": WALK_FORWARD_MIN_TRAIN_DATES,
+                        "min_positive_fold_ratio": WALK_FORWARD_MIN_POSITIVE_FOLD_RATIO,
+                        "min_total_trades": WALK_FORWARD_MIN_TOTAL_TRADES,
+                        "optuna_trials": WALK_FORWARD_OPTUNA_N_TRIALS,
+                        "embargo_days": LABEL_LOOKAHEAD_DAYS,
+                    },
+                },
                 "test_sub_periods_config": {
                     "splits": PROMOTION_TEST_SUB_PERIODS,
                     "min_positive_ratio": PROMOTION_MIN_POSITIVE_PERIOD_RATIO,

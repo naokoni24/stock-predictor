@@ -40,6 +40,7 @@ type OutcomeRow = {
   outcome_date: string;
   net_return: number;
   model_version: string;
+  evaluation_version: string | null;
 };
 
 function isMissingMlExplanationColumn(error: { message?: string | null; code?: string | null } | null) {
@@ -139,7 +140,8 @@ async function fetchWatchlists() {
 }
 
 function isMissingOutcomeTable(error: { message?: string | null; code?: string | null } | null) {
-  return error?.code === "PGRST205" || (error?.message ?? "").includes("signal_outcomes");
+  const message = error?.message ?? "";
+  return error?.code === "PGRST205" || message.includes("signal_outcomes") || message.includes("evaluation_version");
 }
 
 function summarizeOutcomes(rows: OutcomeRow[], days: number) {
@@ -159,11 +161,14 @@ function summarizeOutcomes(rows: OutcomeRow[], days: number) {
 async function fetchLivePerformance() {
   const { data, error } = await supabase
     .from("signal_outcomes")
-    .select("outcome_date, net_return, model_version")
+    .select("outcome_date, net_return, model_version, evaluation_version")
     .order("outcome_date", { ascending: false })
     .limit(500);
   if (isMissingOutcomeTable(error)) return { recent: null, longer: null, latestModel: null, error: null };
-  const rows = (data ?? []) as OutcomeRow[];
+  // 旧定義(終値ベースの絶対リターン)を新定義の超過リターンへ混ぜない。
+  const rows = ((data ?? []) as OutcomeRow[]).filter(
+    (row) => row.evaluation_version === "next_open_stop_excess_v1"
+  );
   return {
     recent: summarizeOutcomes(rows, 30),
     longer: summarizeOutcomes(rows, 90),
@@ -491,7 +496,7 @@ export default async function Home() {
                   <PerformanceRow label="直近30日" stats={performance.recent} />
                   {performance.longer && <PerformanceRow label="直近90日" stats={performance.longer} />}
                   <p className="text-xs leading-relaxed text-muted-foreground">
-                    シグナル日終値から5営業日後終値まで。往復コスト0.2%を控除した参考値です。
+                    翌営業日始値で約定し、8%損切りまたは5営業日後始値で決済。業種/TOPIXに対する超過リターンから往復コスト0.2%を控除した参考値です。
                   </p>
                   {performance.latestModel && (
                     <p className="text-[10px] text-muted-foreground break-all">
