@@ -18,6 +18,7 @@
 - バッチ / ML: Python(yfinance、pandas、scikit-learn、LightGBM、joblib、Optuna)。
 - ホスティング: Vercel Hobby。
 - 定期実行: GitHub Actions(`daily-signals.yml`、`monthly-retrain.yml`)。
+- スケジュール失敗時の自動修復: Vercel Cron(`/api/cron/repair-check`)。
 
 無料枠を維持するための設計方針は [docs/free-tier-architecture.md](docs/free-tier-architecture.md) を参照。
 
@@ -77,10 +78,23 @@ scripts/venv/bin/pip install lightgbm --no-binary lightgbm \
 
 ## GitHub Actions
 
-- **daily-signals**: 毎日実行。株価・テクニカル指標・シグナルを更新し、5営業日後に確定したAI買い候補の本番実績を保存してから、ニュース更新・データ保持期間ルールを適用する。
+- **daily-signals**: 毎日15:30 JSTに実行。株価・テクニカル指標・シグナルを更新し、5営業日後に確定したAI買い候補の本番実績を保存してから、ニュース更新・データ保持期間ルールを適用する。終値が欠損・未更新の銘柄だけを対象にした修復実行が17:00 JSTにも走る(`REPAIR_MISSING_CLOSES_ONLY=1`)。
 - **monthly-retrain**: 月1回実行。MLモデルを再学習し、`scripts/model.pkl` に差分があればbotがcommitする。
 
-いずれも `workflow_dispatch` で手動実行できる。必要なSecrets: `SUPABASE_URL`、`SUPABASE_SERVICE_KEY`。
+いずれも `workflow_dispatch` で手動実行できる。`daily-signals`は`repair_only`入力(`'1'`で修復モード)を指定できる。必要なSecrets: `SUPABASE_URL`、`SUPABASE_SERVICE_KEY`。
+
+## Vercel Cron(スケジュール失敗時の自動修復)
+
+GitHub Actionsの`schedule`イベント自体が高負荷等で大幅遅延・未発火になるケースへの
+フェイルセーフとして、GitHub ActionsとVercelという別々の実行基盤にまたがる監視を行う。
+
+- `vercel.json`で1日1回(19:00 JST頃)、`src/app/api/cron/repair-check`を呼び出す。
+- このAPIは`daily-signals`の本日(JST)分の実行履歴をGitHub REST APIで確認し、
+  実行中・完了済みの実行が1件も無い場合だけ、`repair_only=1`で`workflow_dispatch`を起動する。
+- 必要なVercel環境変数:
+  - `CRON_SECRET`: Vercel CronからのリクエストであることをAuthorizationヘッダーで検証する。
+  - `GITHUB_ACTIONS_TOKEN`: このリポジトリ限定・Actions読み書き権限のfine-grained PAT。
+- 詳細は [docs/free-tier-architecture.md](docs/free-tier-architecture.md) の「スケジュール未発火に対するフェイルセーフ」を参照。
 
 ## Supabaseスキーマ変更
 

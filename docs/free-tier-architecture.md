@@ -106,6 +106,26 @@ GitHub Actionsのログに以下を出す。
 
 失敗時はGitHub Actionsの通知で検知する。
 
+#### スケジュール未発火に対するフェイルセーフ(2026-09-03追加)
+
+`daily-signals.yml`の15:30 JST本実行・17:00 JST修復実行はどちらもGitHub Actionsの
+`schedule`イベントに依存しており、GitHub側でscheduled workflowが高負荷時に遅延・
+欠落する可能性がある(GitHub公式案内)。これは新しい有料の外部監視サービスを追加
+せず、既存の無料枠(Vercel Hobby Cron Jobs)だけで独立したフェイルセーフとして
+対処する。
+
+- `vercel.json`にVercel Cronを1日1回(19:00 JST頃、Vercel Hobbyの実行時刻ブレは
+  最大約59分)登録し、`src/app/api/cron/repair-check/route.ts`を呼び出す。
+- このAPIはGitHub REST APIで`daily-signals.yml`の本日(JST)分の実行履歴を確認し、
+  queued/in_progress中、または既にsuccessで完了した実行が1件もない場合だけ、
+  修復モード(`repair_only=1`)で`workflow_dispatch`を起動する。
+- 終値データそのものの妥当性検証(取引日なのに代表銘柄の終値が欠損していないか)は
+  従来どおり`scripts/fetch_and_signal.py`側で行うため、このAPIは「実行されたか
+  どうか」だけを見ればよく、JPXの休場日判定ロジックを重複して持つ必要がない。
+- 必要な追加設定はVercelの環境変数`CRON_SECRET`(Vercel Cronからの呼び出しを
+  検証)と`GITHUB_ACTIONS_TOKEN`(このリポジトリ限定・Actions読み書き権限の
+  fine-grained PAT)のみで、新しい有料サービスは発生しない。
+
 ## 実装優先順位
 
 1. 休場日の重複シグナル日付を防ぐ。
