@@ -46,7 +46,11 @@ export async function proxy(request: NextRequest) {
 }
 
 export const config = {
+  // /api配下(src/app/api/cron/repair-check等)はSupabaseセッションを持たない
+  // 外部からのAPI呼び出し(Vercel Cron等)が対象で、ここで/loginへリダイレクトすると
+  // 呼び出し元が期待するJSONではなくHTMLが返ってしまうため、authミドルウェアの対象外にする。
+  // API側の認証は各Route Handlerが個別に行う(cron/repair-checkはCRON_SECRETで検証)。
   matcher: [
-    "/((?!_next/static|_next/image|favicon.ico|apple-icon|icon|manifest|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
+    "/((?!api|_next/static|_next/image|favicon.ico|apple-icon|icon|manifest|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
   ],
 };
