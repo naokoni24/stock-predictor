@@ -2,7 +2,7 @@ yfinance
 jpholiday
 pandas
 supabase
-xlrd
+openpyxl
 scikit-learn
 lightgbm
 joblib

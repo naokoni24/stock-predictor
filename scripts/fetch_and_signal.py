@@ -332,21 +332,34 @@ def get_next_earnings_date(ticker: str, as_of_date=None):
         return None
 
 
-JPX_LIST_URL = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls"
+# JPXは2026年までに一覧の配布形式を.xlsから.xlsxへ変更しており、旧URLは404を返す。
+# 取得に失敗しても例外を握り潰して空マップを返す作りだったため、業種・銘柄名の更新が
+# 静かに止まったまま長期間気付かれなかった。URL変更時は必ずログの警告で気付けるようにする。
+JPX_LIST_URL = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xlsx"
+# ETF・REITなど33業種区分を持たない銘柄は "-" で配布される。業種なしとして扱う。
+PLACEHOLDER_SECTORS = {"", "-", "nan", "none", "None"}
+
+
+def normalize_sector(value) -> str | None:
+    """業種の空値・プレースホルダーをNoneに統一する。"""
+    if value is None:
+        return None
+    text = str(value).strip()
+    return None if text in PLACEHOLDER_SECTORS else text
 
 
 def get_jpx_maps() -> tuple[dict[str, str], dict[str, str]]:
     """JPX上場銘柄一覧から銘柄名・業種のマップを取得"""
     try:
         df = pd.read_excel(JPX_LIST_URL)
-        name_map = {
-            f"{str(row['コード']).strip()}.T": str(row['銘柄名']).strip()
-            for _, row in df.iterrows()
-        }
-        sector_map = {
-            f"{str(row['コード']).strip()}.T": str(row['33業種区分']).strip()
-            for _, row in df.iterrows()
-        }
+        name_map = {}
+        sector_map = {}
+        for _, row in df.iterrows():
+            ticker = f"{str(row['コード']).strip()}.T"
+            name_map[ticker] = str(row['銘柄名']).strip()
+            sector = normalize_sector(row['33業種区分'])
+            if sector is not None:
+                sector_map[ticker] = sector
         return name_map, sector_map
     except Exception as e:
         print(f"failed to load JPX list: {e}")
@@ -363,6 +376,67 @@ def get_jp_sector_map() -> dict[str, str]:
     """JPX上場銘柄一覧から証券コード→業種(33業種区分)のマップを取得"""
     _, sectors = get_jpx_maps()
     return sectors
+
+
+# 銘柄マスタは1回のPostgRESTリクエストで返せる1000行を超えているため、
+# 単発クエリだと先頭1000件で静かに切れる。
+STOCK_MASTER_PAGE_SIZE = 1000
+STOCK_MASTER_MAX_PAGES = 50
+
+
+def fetch_stock_master(sb) -> dict[str, dict]:
+    """銘柄マスタを全件取得してticker->行のマップにする。"""
+    rows: dict[str, dict] = {}
+    for page in range(STOCK_MASTER_MAX_PAGES):
+        offset = page * STOCK_MASTER_PAGE_SIZE
+        chunk = (
+            sb.table("stocks")
+            .select("ticker, name, sector")
+            .order("ticker", desc=False)
+            .range(offset, offset + STOCK_MASTER_PAGE_SIZE - 1)
+            .execute()
+            .data
+            or []
+        )
+        rows.update({row["ticker"]: row for row in chunk})
+        if len(chunk) < STOCK_MASTER_PAGE_SIZE:
+            break
+    return rows
+
+
+def upsert_stock_master(sb, all_tickers: dict[str, str], jp_sectors: dict[str, str], backfill: bool):
+    """銘柄マスタを更新し、業種が欠けている既存銘柄をJPX一覧から埋め直す。
+
+    JPX一覧を引けなかった項目は既存値を維持する(ファンダメンタルと同じ方針)。
+    以前はJPXのURLが404になったあとも`jp_sectors.get(t)`のNoneをそのまま書いており、
+    処理した銘柄の業種が毎日nullで潰され続けていた。業種は実績評価のベンチマーク
+    (同業種平均)を決めるため、欠けるとTOPIXへ退避して評価の前提が崩れる。
+    """
+    existing = fetch_stock_master(sb)
+    rows = [
+        {
+            "ticker": ticker,
+            "name": name or existing.get(ticker, {}).get("name") or ticker,
+            "sector": jp_sectors.get(ticker) or normalize_sector(existing.get(ticker, {}).get("sector")),
+        }
+        for ticker, name in all_tickers.items()
+    ]
+
+    backfilled = 0
+    if backfill and jp_sectors:
+        # 当日ユニバース外の銘柄も対象にする。過去に取り込んだまま業種が欠けている
+        # 銘柄がシグナルを出すと、その実績が業種ベンチマークで評価されなくなるため。
+        for ticker, row in existing.items():
+            if ticker in all_tickers or normalize_sector(row.get("sector")) is not None:
+                continue
+            sector = jp_sectors.get(ticker)
+            if sector == row.get("sector"):
+                continue
+            rows.append({"ticker": ticker, "name": row.get("name") or ticker, "sector": sector})
+            backfilled += 1
+
+    upsert_in_chunks(sb.table("stocks"), rows, on_conflict="ticker")
+    print(f"stock master upserted: {len(rows)} rows (sector backfilled: {backfilled})")
 
 
 def get_holdings_tickers(sb) -> dict[str, str]:
@@ -651,6 +725,10 @@ def main():
     now_jst = datetime.now(timezone(timedelta(hours=9)))
     cutoff_date, after_market_close = get_market_cutoff(now_jst)
     jp_names, jp_sectors = get_jpx_maps()
+    if not jp_names:
+        # 一覧が取れないと業種・日本語銘柄名・JPXからのユニバース補充が同時に劣化する。
+        # 標準出力に紛れて見落とされないよう、GitHub Actionsの警告注釈として出す。
+        print("::warning::JPX上場銘柄一覧を取得できませんでした。業種・銘柄名の更新をスキップします。")
     repair_only = os.environ.get("REPAIR_MISSING_CLOSES_ONLY") == "1"
     all_tickers = (
         select_repair_tickers(sb, jp_names, cutoff_date)
@@ -666,13 +744,8 @@ def main():
         print("更新対象の欠損・未更新銘柄はありません。")
         return
 
-    # 銘柄マスタをupsert
-    sb.table("stocks").upsert(
-        [
-            {"ticker": t, "name": n, "sector": jp_sectors.get(t)}
-            for t, n in all_tickers.items()
-        ]
-    ).execute()
+    # 銘柄マスタをupsert(当日ユニバース外の業種欠損もJPX一覧から埋め直す)
+    upsert_stock_master(sb, all_tickers, jp_sectors, backfill=not repair_only)
 
     histories = {}
     all_price_rows = []
@@ -893,7 +966,7 @@ def update_fundamentals(sb, all_tickers, jp_sectors, signal_results):
 
     existing_res = (
         sb.table("stocks")
-        .select("ticker, per, pbr, target_price, forecast_eps")
+        .select("ticker, name, sector, per, pbr, target_price, forecast_eps")
         .in_("ticker", list(targets))
         .execute()
     )
@@ -910,8 +983,10 @@ def update_fundamentals(sb, all_tickers, jp_sectors, signal_results):
         }
         rows.append({
             "ticker": ticker,
-            "name": all_tickers.get(ticker, ticker),
-            "sector": jp_sectors.get(ticker),
+            # 銘柄名・業種もJPX一覧を引けなかった場合は既存値を維持する
+            # (ここでNoneを書くとupsert_stock_masterで埋めた業種を潰してしまう)。
+            "name": all_tickers.get(ticker) or existing.get("name") or ticker,
+            "sector": jp_sectors.get(ticker) or normalize_sector(existing.get("sector")),
             **merged,
         })
 
