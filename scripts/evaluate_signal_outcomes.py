@@ -14,6 +14,10 @@ STOP_LOSS_PCT = 0.08
 # シグナル日から翌営業日約定、5営業日保有後の始値決済までを評価するため、余裕を持たせる。
 LOOKBACK_CALENDAR_DAYS = 45
 PAGE_SIZE = 1000
+# 取得ループの安全弁。45日窓の価格が3万行程度なので十分な余裕を持たせている。
+MAX_FETCH_PAGES = 200
+# 1回のupsertが大きくなりすぎないように分割して保存する。
+UPSERT_CHUNK_SIZE = 500
 EVALUATION_VERSION = "next_open_stop_excess_v1"
 
 
@@ -146,24 +150,47 @@ def build_outcome_rows(
     return outcomes
 
 
+def fetch_all_rows(build_query, label: str) -> list[dict]:
+    """PostgRESTの1リクエスト最大1000行の制限を超えて、対象を全件取得する。
+
+    build_queryは`.range()`を付ける前のクエリを毎回新しく組み立てて返す関数。
+    行数の上限を設けると、上限を超えた時点で「データが存在しない」のと区別が付かず、
+    黙って一部だけを処理してしまうため、ページが埋まらなくなるまで読み切る。
+    暴走防止の安全弁として`MAX_FETCH_PAGES`で打ち切り、その場合は明示的に失敗させる。
+    ページ境界での取りこぼし・重複を避けるため、build_query側で主キー相当の
+    一意な並び順を指定すること。
+    """
+    rows: list[dict] = []
+    for page_index in range(MAX_FETCH_PAGES):
+        offset = page_index * PAGE_SIZE
+        page = build_query().range(offset, offset + PAGE_SIZE - 1).execute().data or []
+        rows.extend(page)
+        if len(page) < PAGE_SIZE:
+            return rows
+    raise RuntimeError(
+        f"{label}の取得が{MAX_FETCH_PAGES}ページ({MAX_FETCH_PAGES * PAGE_SIZE}行)を超えました。"
+        "取得条件かMAX_FETCH_PAGESを見直してください。"
+    )
+
+
 def fetch_all_prices(sb, since: str, until: str) -> list[dict]:
-    """評価対象ユニバース全体のOHLCを取得する。"""
-    rows = []
-    for offset in range(0, 10_000, PAGE_SIZE):
-        response = (
+    """評価対象ユニバース全体のOHLCを取得する。
+
+    以前は最大10,000行で打ち切っていたため、45日窓の`prices`が2万行を超える本番では
+    古い十数営業日分しか届かず、それ以降のシグナルが「翌営業日始値から5営業日後始値まで
+    の価格が足りない」と判定されて実績台帳に入らないままだった。
+    """
+    return fetch_all_rows(
+        lambda: (
             sb.table("prices")
             .select("ticker, date, open, low")
             .gte("date", since)
             .lte("date", until)
             .order("date", desc=False)
-            .range(offset, offset + PAGE_SIZE - 1)
-            .execute()
-        )
-        page = response.data or []
-        rows.extend(page)
-        if len(page) < PAGE_SIZE:
-            break
-    return rows
+            .order("ticker", desc=False)
+        ),
+        "価格履歴",
+    )
 
 
 def fetch_topix_prices(since: str, today: date) -> list[dict]:
@@ -191,15 +218,18 @@ def main():
     today = date.today()
     since = (today - timedelta(days=LOOKBACK_CALENDAR_DAYS)).isoformat()
     try:
-        signal_response = (
-            sb.table("signals")
-            .select("ticker, date, ml_score, ml_threshold, model_version, stocks(sector)")
-            .eq("ml_signal", "buy_candidate")
-            .gte("date", since)
-            .lte("date", today.isoformat())
-            .order("date", desc=False)
-            .limit(500)
-            .execute()
+        # 評価対象の買い候補も打ち切らずに全件取る(45日窓で400件を超える日がある)。
+        signal_rows = fetch_all_rows(
+            lambda: (
+                sb.table("signals")
+                .select("ticker, date, ml_score, ml_threshold, model_version, stocks(sector)")
+                .eq("ml_signal", "buy_candidate")
+                .gte("date", since)
+                .lte("date", today.isoformat())
+                .order("date", desc=False)
+                .order("ticker", desc=False)
+            ),
+            "AI買い候補",
         )
     except Exception as exc:
         # 手動SQLが未適用の状態では、日次バッチ全体を止めずに次回へ持ち越す。
@@ -208,11 +238,15 @@ def main():
             return
         raise
 
-    signal_rows = signal_response.data or []
     if not signal_rows:
         print("確定待ちを含むAI買い候補はありません。")
         return
-    stock_rows = sb.table("stocks").select("ticker, sector").execute().data or []
+    # 銘柄マスタは1800件を超えており、単発クエリだと先頭1000件で切れて
+    # 業種が引けない銘柄が生まれ、業種ベンチマークが誤ってTOPIXへ退避してしまう。
+    stock_rows = fetch_all_rows(
+        lambda: sb.table("stocks").select("ticker, sector").order("ticker", desc=False),
+        "銘柄マスタ",
+    )
     sector_by_ticker = {row["ticker"]: row.get("sector") for row in stock_rows}
     for signal in signal_rows:
         sector_by_ticker.setdefault(signal["ticker"], _sector_from_joined_stock(signal.get("stocks")))
@@ -224,7 +258,9 @@ def main():
         print("翌営業日始値から5営業日後始値までの評価期間が未確定のため、本番実績の追加はありません。")
         return
     try:
-        sb.table("signal_outcomes").upsert(outcome_rows, on_conflict="ticker,signal_date").execute()
+        for start in range(0, len(outcome_rows), UPSERT_CHUNK_SIZE):
+            chunk = outcome_rows[start : start + UPSERT_CHUNK_SIZE]
+            sb.table("signal_outcomes").upsert(chunk, on_conflict="ticker,signal_date").execute()
     except Exception as exc:
         if any(column in str(exc) for column in ("entry_open", "benchmark_return", "evaluation_version")):
             print(
