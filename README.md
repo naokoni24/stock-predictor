@@ -78,7 +78,7 @@ scripts/venv/bin/pip install lightgbm --no-binary lightgbm \
 
 ## GitHub Actions
 
-- **daily-signals**: 毎日15:30 JSTに実行。株価・テクニカル指標・シグナルを更新し、5営業日後に確定したAI買い候補の本番実績を保存してから、ニュース更新・データ保持期間ルールを適用する。終値が欠損・未更新の銘柄だけを対象にした修復実行が17:00 JSTにも走る(`REPAIR_MISSING_CLOSES_ONLY=1`)。
+- **daily-signals**: 毎日15:37 JSTに実行。株価・テクニカル指標・シグナルを更新し、5営業日後に確定したAI買い候補の本番実績を保存してから、ニュース更新・データ保持期間ルールを適用する。終値が欠損・未更新の銘柄だけを対象にした修復実行が17:12 JSTにも走る(`REPAIR_MISSING_CLOSES_ONLY=1`)。時刻がキリの良い15:30/17:00でないのは、GitHub Actionsのscheduleイベントが毎時ちょうど等の混雑時間帯で遅延・欠落しやすいのを避けるため(2026-09-04調整)。
 - **monthly-retrain**: 月1回実行。MLモデルを再学習し、`scripts/model.pkl` に差分があればbotがcommitする。
 
 いずれも `workflow_dispatch` で手動実行できる。`daily-signals`は`repair_only`入力(`'1'`で修復モード)を指定できる。必要なSecrets: `SUPABASE_URL`、`SUPABASE_SERVICE_KEY`。
@@ -88,7 +88,7 @@ scripts/venv/bin/pip install lightgbm --no-binary lightgbm \
 GitHub Actionsの`schedule`イベント自体が高負荷等で大幅遅延・未発火になるケースへの
 フェイルセーフとして、GitHub ActionsとVercelという別々の実行基盤にまたがる監視を行う。
 
-- `vercel.json`で1日2回(17:45 JST頃・19:00 JST頃)、`src/app/api/cron/repair-check`を呼び出す。17:45は17:00修復実行の想定遅延を見込んだ早期検知、19:00は17:45のVercel Cron自体が飛んだ場合の最終保険(判定ロジックが冪等なので2本立てても正規の実行と競合しない)。
+- `vercel.json`で1日2回(17:52 JST頃・19:07 JST頃)、`src/app/api/cron/repair-check`を呼び出す。17:52は17:12修復実行の想定遅延を見込んだ早期検知、19:07は17:52のVercel Cron自体が飛んだ場合の最終保険(判定ロジックが冪等なので2本立てても正規の実行と競合しない)。
 - このAPIは`daily-signals`の本日(JST)分の実行履歴をGitHub REST APIで確認し、
   実行中・完了済みの実行が1件も無い場合だけ、`repair_only=1`で`workflow_dispatch`を起動する。
 - 必要なVercel環境変数:

@@ -4,16 +4,23 @@ import { NextRequest, NextResponse } from "next/server";
  * GitHub Actions(daily-signals.yml)の日次スケジュール実行が大幅に遅延・未発火の
  * ときだけ、修復モード(REPAIR_MISSING_CLOSES_ONLY)でworkflow_dispatchを起動する。
  *
- * 15:30 JSTの本実行・17:00 JSTの修復実行はどちらもGitHub Actionsの`schedule`
+ * 15:37 JSTの本実行・17:12 JSTの修復実行はどちらもGitHub Actionsの`schedule`
  * イベントに依存しており、GitHub側のスケジュール配送遅延には対処できない
- * (GitHub公式もscheduled workflowが高負荷時に遅延・欠落しうると案内している)。
- * このAPIはVercel Cron(vercel.jsonで17:45 JST頃・19:00 JST頃の2回に設定、
- * 2026-09-04に17:45を追加して二段構成化)から呼び出され、GitHub Actions基盤
- * とは独立した経路でフェイルセーフとして機能する。
- * 1回目(17:45)は17:00修復実行の想定遅延を見込んだ早期検知、2回目(19:00)は
+ * (GitHub公式もscheduled workflowが高負荷時に遅延・欠落しうると案内しており、
+ * 特に毎時ちょうど等キリの良い時刻は混雑しやすいと明記している。2026-09-04に
+ * 本実行:30・修復実行:00がどちらも未発火する事象が発生したため、daily-signals.yml
+ * 側のcron分も:30/:00から:37/:12へ変更した)。
+ * このAPIはVercel Cron(vercel.jsonで17:52 JST頃・19:07 JST頃の2回に設定、
+ * 2026-09-04に17:45を追加して二段構成化、同日中に:45/:00→:52/:07へ再調整)
+ * から呼び出され、GitHub Actions基盤とは独立した経路でフェイルセーフとして
+ * 機能する。
+ * 1回目(17:52)は17:12修復実行の想定遅延を見込んだ早期検知、2回目(19:07)は
  * 1回目のVercel Cron自体が飛んだ場合の最終保険。判定ロジックが冪等
  * (queued/in_progress/success済みなら何もしない)なので、2本立てても
  * 正規の実行と競合しない。
+ *
+ * 2026-09-04時点ではcron分の調整が実際に発火安定性を改善するかは未検証。
+ * 2026-09-08週以降の実行実績(gh run list)を見て、必要ならさらに調整する。
  *
  * 判定ロジック(2026-09-03):
  * - 本日(JST)分のdaily-signals実行が既にqueued/in_progressなら何もしない。
