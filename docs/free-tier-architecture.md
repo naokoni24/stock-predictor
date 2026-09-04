@@ -114,8 +114,15 @@ GitHub Actionsのログに以下を出す。
 せず、既存の無料枠(Vercel Hobby Cron Jobs)だけで独立したフェイルセーフとして
 対処する。
 
-- `vercel.json`にVercel Cronを1日1回(19:00 JST頃、Vercel Hobbyの実行時刻ブレは
-  最大約59分)登録し、`src/app/api/cron/repair-check/route.ts`を呼び出す。
+- `vercel.json`にVercel Cronを1日2回(17:45 JST頃・19:00 JST頃、Vercel Hobbyの
+  実行時刻ブレは1本あたり最大約59分。2026-09-04に17:45を追加して二段構成化。
+  Hobbyでもcron jobは1プロジェクトあたり最大100個まで登録可、各jobは1日1回まで
+  という制約なので、複数jobを立てること自体は無料枠内)登録し、
+  `src/app/api/cron/repair-check/route.ts`を呼び出す。1回目(17:45)は17:00修復
+  実行の想定遅延(実績30〜40分)を見込んだ早期検知、2回目(19:00)は1回目の
+  Vercel Cron自体が飛んだ場合の最終保険。判定ロジックが冪等(queued/in_progress/
+  success済みなら何もしない)なので、2本立てても正規の実行やもう一方のcronと
+  競合しない。
 - このAPIはGitHub REST APIで`daily-signals.yml`の本日(JST)分の実行履歴を確認し、
   queued/in_progress中、または既にsuccessで完了した実行が1件もない場合だけ、
   修復モード(`repair_only=1`)で`workflow_dispatch`を起動する。

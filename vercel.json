@@ -3,6 +3,10 @@
   "crons": [
     {
       "path": "/api/cron/repair-check",
+      "schedule": "45 8 * * *"
+    },
+    {
+      "path": "/api/cron/repair-check",
       "schedule": "0 10 * * *"
     }
   ]

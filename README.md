@@ -88,7 +88,7 @@ scripts/venv/bin/pip install lightgbm --no-binary lightgbm \
 GitHub Actionsの`schedule`イベント自体が高負荷等で大幅遅延・未発火になるケースへの
 フェイルセーフとして、GitHub ActionsとVercelという別々の実行基盤にまたがる監視を行う。
 
-- `vercel.json`で1日1回(19:00 JST頃)、`src/app/api/cron/repair-check`を呼び出す。
+- `vercel.json`で1日2回(17:45 JST頃・19:00 JST頃)、`src/app/api/cron/repair-check`を呼び出す。17:45は17:00修復実行の想定遅延を見込んだ早期検知、19:00は17:45のVercel Cron自体が飛んだ場合の最終保険(判定ロジックが冪等なので2本立てても正規の実行と競合しない)。
 - このAPIは`daily-signals`の本日(JST)分の実行履歴をGitHub REST APIで確認し、
   実行中・完了済みの実行が1件も無い場合だけ、`repair_only=1`で`workflow_dispatch`を起動する。
 - 必要なVercel環境変数:

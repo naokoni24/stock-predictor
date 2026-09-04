@@ -7,8 +7,13 @@ import { NextRequest, NextResponse } from "next/server";
  * 15:30 JSTの本実行・17:00 JSTの修復実行はどちらもGitHub Actionsの`schedule`
  * イベントに依存しており、GitHub側のスケジュール配送遅延には対処できない
  * (GitHub公式もscheduled workflowが高負荷時に遅延・欠落しうると案内している)。
- * このAPIはVercel Cron(vercel.jsonで19:00 JST頃に設定)から呼び出され、
- * GitHub Actions基盤とは独立した経路でフェイルセーフとして機能する。
+ * このAPIはVercel Cron(vercel.jsonで17:45 JST頃・19:00 JST頃の2回に設定、
+ * 2026-09-04に17:45を追加して二段構成化)から呼び出され、GitHub Actions基盤
+ * とは独立した経路でフェイルセーフとして機能する。
+ * 1回目(17:45)は17:00修復実行の想定遅延を見込んだ早期検知、2回目(19:00)は
+ * 1回目のVercel Cron自体が飛んだ場合の最終保険。判定ロジックが冪等
+ * (queued/in_progress/success済みなら何もしない)なので、2本立てても
+ * 正規の実行と競合しない。
  *
  * 判定ロジック(2026-09-03):
  * - 本日(JST)分のdaily-signals実行が既にqueued/in_progressなら何もしない。
