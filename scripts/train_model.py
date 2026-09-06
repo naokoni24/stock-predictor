@@ -103,7 +103,12 @@ OOF_CALIBRATION_MIN_SCORES = 500
 # lambdarankはrelevanceを非負の離散値として扱うため、連続値の超過リターンを
 # 分位ビンに変換してから渡す(RANKER_RELEVANCE_BINS段階)。
 RANKER_RELEVANCE_BINS = 5
-RANKER_BLEND_WEIGHT = 0.5  # 分類モデル較正スコアとランカー較正スコアの平均比率(0=分類のみ/1=ランカーのみ)
+# 2026-09-06診断用に一時的に0へ変更。初回導入時(run 34019821340)の再学習で候補モデルが
+# テスト期間avg_return=-1.14%(既存モデルの同期間-0.10%より大幅に悪化)・walk-forward
+# 3fold全マイナスで昇格見送りとなり、ランカー追加が主因かどうかを切り分けるため、
+# 学習・OOF較正は従来通り実行しつつブレンドだけ無効化(=分類モデルのみ)にして再学習する。
+# 原因切り分け後、結果に応じて0.5へ戻すか正式に見直す。
+RANKER_BLEND_WEIGHT = 0.0  # 分類モデル較正スコアとランカー較正スコアの平均比率(0=分類のみ/1=ランカーのみ)
 RANKER_PARAMS = dict(
     objective="lambdarank",
     n_estimators=200,
