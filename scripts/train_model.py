@@ -35,7 +35,7 @@ from fetch_and_signal import (
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier
 from sklearn.metrics import accuracy_score, classification_report
 from sklearn.utils.class_weight import compute_sample_weight
-from lightgbm import LGBMClassifier
+from lightgbm import LGBMClassifier, LGBMRanker
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
@@ -92,6 +92,28 @@ ENSEMBLE_SEEDS = [42, 202, 777]
 OOF_CALIBRATION_FOLDS = 3
 OOF_CALIBRATION_MIN_TRAIN_DATES = 120
 OOF_CALIBRATION_MIN_SCORES = 500
+
+# ランキング学習(LGBMRanker、2026-09-06追加)。
+# 分類モデルは「+0.5%以上か」の二値分類確率を分位点較正しているだけで、
+# 本来の運用(その日の候補を超過リターン期待値順に並べ上位N件を買う)を直接最適化していない。
+# 本番実績台帳(signal_outcomes、2026-07-21〜08-27)を確認したところ、日内スコア1位の
+# 平均超過リターンが最下位(-1.90%)になる逆転が起きており、分類確率のランキングとしての
+# 質そのものに課題があった。LGBMRankerで「同日内でどちらが良いか」を直接学習し、
+# 分類モデルの較正済みスコアと平均して使うことで、この逆転を緩和する狙い。
+# lambdarankはrelevanceを非負の離散値として扱うため、連続値の超過リターンを
+# 分位ビンに変換してから渡す(RANKER_RELEVANCE_BINS段階)。
+RANKER_RELEVANCE_BINS = 5
+RANKER_BLEND_WEIGHT = 0.5  # 分類モデル較正スコアとランカー較正スコアの平均比率(0=分類のみ/1=ランカーのみ)
+RANKER_PARAMS = dict(
+    objective="lambdarank",
+    n_estimators=200,
+    max_depth=4,
+    num_leaves=15,
+    min_child_samples=30,
+    learning_rate=0.05,
+    random_state=42,
+    verbose=-1,
+)
 
 # soft votingを構成する個別推定器の確率の標準偏差。値が大きい候補は、
 # モデル間で見解が割れているため、検証期間で選んだ上限を超えた場合は見送る。
@@ -221,6 +243,14 @@ BREADTH_FEATURE_COLUMNS = [
     "cs_rank_return_5d",           # 5日リターンの当日ユニバース内百分位(0〜1)
     "cs_rank_return_20d",          # 20日リターンの当日ユニバース内百分位(0〜1)
     "cs_rank_volume_ratio",        # 出来高比率の当日ユニバース内百分位(0〜1)
+    # 2026-09-06追加: ターゲット(同日・同業種平均に対する超過リターン)は相対指標なのに
+    # 個別特徴量の大半が絶対値だった不整合を埋めるためのクロスセクショナル順位。
+    # 生の値ではなく「その日のユニバース内で強いか弱いか」を直接表現する。
+    "cs_rank_rsi14",               # RSI14の当日ユニバース内百分位(過熱/売られすぎの相対位置)
+    "cs_rank_macd_diff",           # MACDヒストグラムの当日ユニバース内百分位(モメンタムの相対強さ)
+    "cs_rank_bb_position",         # ボリンジャーバンド内位置の当日ユニバース内百分位
+    "cs_rank_volatility_20d",      # 20日ボラティリティの当日ユニバース内百分位
+    "cs_rank_atr_ratio_14d",       # ATR比率の当日ユニバース内百分位
 ]
 
 # ブレッドス・順位を計算する最低銘柄数。これ未満の日は比率・順位が不安定なため
@@ -274,8 +304,33 @@ FEATURE_COLUMNS = (
 )
 
 import os
+import shutil
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "model.pkl")
+
+# モデル世代の時間軸アンサンブル(2026-09-06追加)。月次再学習ごとの成績のブレを
+# 緩和するため、直近2世代(model_gen1.pkl=1つ前、model_gen2.pkl=2つ前)を残し、
+# 日次推論(fetch_and_signal.py)で現行モデルと合わせて最大3世代分のスコアを平均する。
+# 世代ファイルは昇格時(候補モデルをmodel.pklへ保存する直前)だけ繰り下げる
+# (見送られた候補で世代を汚さないため)。
+MODEL_GEN_PATHS = [
+    os.path.join(os.path.dirname(__file__), "model_gen1.pkl"),
+    os.path.join(os.path.dirname(__file__), "model_gen2.pkl"),
+]
+
+
+def rotate_model_generations() -> None:
+    """モデル世代ファイルを1つずつ繰り下げる(model.pkl→gen1、gen1→gen2)。
+
+    昇格が決まり候補モデルでmodel.pklを上書きする直前に呼ぶこと。
+    まだ世代ファイルが無い(初回学習・導入直後)場合は該当コピーを単に飛ばす。
+    """
+    generation_chain = [MODEL_PATH] + MODEL_GEN_PATHS
+    for older_index in range(len(generation_chain) - 1, 0, -1):
+        src = generation_chain[older_index - 1]
+        dst = generation_chain[older_index]
+        if os.path.exists(src):
+            shutil.copyfile(src, dst)
 
 
 def build_voting_model(
@@ -369,7 +424,10 @@ def add_breadth_features(feature_frames: dict[str, pd.DataFrame]) -> dict[str, p
         if df.empty or "date" not in df.columns:
             continue
         rows.append(
-            df[["date", "sma25_ratio", "return_1d", "return_5d", "return_20d", "volume_ratio"]]
+            df[[
+                "date", "sma25_ratio", "return_1d", "return_5d", "return_20d", "volume_ratio",
+                "rsi14", "macd_diff", "bb_position", "volatility_20d", "atr_ratio_14d",
+            ]]
             .assign(ticker=ticker)
         )
 
@@ -406,14 +464,20 @@ def add_breadth_features(feature_frames: dict[str, pd.DataFrame]) -> dict[str, p
         )
 
         # クロスセクショナル百分位順位(その日の全銘柄中の位置、NaNはNaNのまま)
-        for source_col, rank_col in [
+        rank_source_columns = [
             ("return_5d", "cs_rank_return_5d"),
             ("return_20d", "cs_rank_return_20d"),
             ("volume_ratio", "cs_rank_volume_ratio"),
-        ]:
+            ("rsi14", "cs_rank_rsi14"),
+            ("macd_diff", "cs_rank_macd_diff"),
+            ("bb_position", "cs_rank_bb_position"),
+            ("volatility_20d", "cs_rank_volatility_20d"),
+            ("atr_ratio_14d", "cs_rank_atr_ratio_14d"),
+        ]
+        for source_col, rank_col in rank_source_columns:
             valid[rank_col] = valid.groupby("date")[source_col].rank(pct=True)
 
-        rank_columns = ["cs_rank_return_5d", "cs_rank_return_20d", "cs_rank_volume_ratio"]
+        rank_columns = [rank_col for _, rank_col in rank_source_columns]
         ranks_by_ticker = {
             ticker: group[["date"] + rank_columns]
             for ticker, group in valid.groupby("ticker")
@@ -563,6 +627,145 @@ def build_time_series_oof_calibration(
     return np.percentile(raw_oof_scores, percentiles).tolist(), metadata
 
 
+def build_ranking_relevance(
+    future_excess_return: pd.Series, bin_edges: np.ndarray | None = None
+) -> tuple[np.ndarray, np.ndarray]:
+    """超過リターンを0〜N-1の順位学習用relevance(非負の離散値)へ変換する。
+
+    LightGBMのlambdarankはrelevanceを非負の離散グレードとして扱うため、
+    連続値の超過リターン(マイナス含む)をそのまま渡せない。分位ビンに落として使う。
+    bin_edgesを渡すと学習時に決めた境界を再利用する(検証・テスト側での情報漏れ防止)。
+    """
+    values = np.asarray(future_excess_return, dtype=float)
+    if bin_edges is None:
+        _, bin_edges = pd.qcut(values, q=RANKER_RELEVANCE_BINS, retbins=True, duplicates="drop")
+        # 両端を確実にすべての値を含む範囲にしておく(テスト側で分布が外側にはみ出ても壊れないため)
+        bin_edges = bin_edges.copy()
+        bin_edges[0] = -np.inf
+        bin_edges[-1] = np.inf
+    relevance = np.searchsorted(bin_edges, values, side="right") - 1
+    relevance = np.clip(relevance, 0, len(bin_edges) - 2)
+    return relevance.astype(int), bin_edges
+
+
+def build_ranker_groups(dates) -> np.ndarray:
+    """LGBMRankerのgroup(同一日内の件数)を作る。
+
+    呼び出し側はdate昇順にソート済み(同じ日付が連続)のDataFrameを渡すこと
+    (build_dataset側でdataset全体をdate昇順ソートしてから分割しているため、
+    train/val/test各dfはこの前提を満たす)。
+    """
+    _, group_sizes = np.unique(np.asarray(dates), return_counts=True)
+    return group_sizes
+
+
+def train_ranker_model(X_train: pd.DataFrame, future_excess_return: pd.Series, dates) -> LGBMRanker:
+    """同日内の相対順位を直接最適化するLGBMRankerを学習する。"""
+    relevance, _ = build_ranking_relevance(future_excess_return)
+    groups = build_ranker_groups(dates)
+    ranker = LGBMRanker(**RANKER_PARAMS)
+    ranker.fit(X_train, relevance, group=groups)
+    return ranker
+
+
+def build_ranker_time_series_oof_calibration(
+    X: pd.DataFrame,
+    future_excess_return: pd.Series,
+    dates,
+    folds: int = OOF_CALIBRATION_FOLDS,
+    embargo_days: int = LABEL_LOOKAHEAD_DAYS,
+) -> tuple[list[float] | None, dict]:
+    """ランカーの予測スコアも、分類モデルと同じ購入済みexpanding-window OOFで較正する。
+
+    fold分割・エンバーゴの考え方はbuild_time_series_oof_calibrationと共通。
+    分類モデル用と処理を分けているのは、fit/predictのシグネチャ(groupが必要・
+    predict_probaでなくpredict)が異なり、無理に共通化すると両方の可読性が落ちるため。
+    """
+    X = X.reset_index(drop=True)
+    future_excess_return = pd.Series(future_excess_return).reset_index(drop=True)
+    date_values = pd.to_datetime(pd.Series(dates)).reset_index(drop=True)
+    unique_dates = np.array(sorted(date_values.dt.normalize().unique()))
+    metadata = {
+        "method": "purged_expanding_time_series_oof_ranker",
+        "folds_requested": int(folds),
+        "embargo_days": int(embargo_days),
+        "folds": [],
+        "fallback": None,
+    }
+    minimum_dates = OOF_CALIBRATION_MIN_TRAIN_DATES + folds * 5
+    if len(unique_dates) < minimum_dates:
+        metadata["fallback"] = f"取引日不足 ({len(unique_dates)} < {minimum_dates})"
+        return None, metadata
+
+    first_validation_position = max(OOF_CALIBRATION_MIN_TRAIN_DATES, len(unique_dates) // 2)
+    validation_chunks = [
+        chunk
+        for chunk in np.array_split(unique_dates[first_validation_position:], folds)
+        if len(chunk)
+    ]
+    oof_scores = []
+    normalized_dates = date_values.dt.normalize().to_numpy()
+    for fold_number, validation_dates in enumerate(validation_chunks, start=1):
+        validation_start_position = int(np.searchsorted(unique_dates, validation_dates[0]))
+        cutoff_position = max(validation_start_position - embargo_days, 0)
+        train_dates = unique_dates[:cutoff_position]
+        if not len(train_dates):
+            continue
+        train_mask = np.isin(normalized_dates, train_dates)
+        validation_mask = np.isin(normalized_dates, validation_dates)
+        if not train_mask.any() or not validation_mask.any():
+            continue
+
+        fold_train_positions = np.flatnonzero(train_mask)
+        fold_relevance, _ = build_ranking_relevance(
+            future_excess_return.iloc[fold_train_positions]
+        )
+        fold_groups = build_ranker_groups(date_values.iloc[fold_train_positions])
+        fold_ranker = LGBMRanker(**RANKER_PARAMS)
+        fold_ranker.fit(X.iloc[fold_train_positions], fold_relevance, group=fold_groups)
+        fold_scores = fold_ranker.predict(X.iloc[np.flatnonzero(validation_mask)])
+        oof_scores.append(fold_scores)
+        metadata["folds"].append(
+            {
+                "fold": fold_number,
+                "train_start": str(pd.Timestamp(train_dates[0]).date()),
+                "train_end": str(pd.Timestamp(train_dates[-1]).date()),
+                "validation_start": str(pd.Timestamp(validation_dates[0]).date()),
+                "validation_end": str(pd.Timestamp(validation_dates[-1]).date()),
+                "train_rows": int(train_mask.sum()),
+                "validation_rows": int(validation_mask.sum()),
+            }
+        )
+
+    if not oof_scores:
+        metadata["fallback"] = "有効なOOF foldを作成できない"
+        return None, metadata
+    raw_oof_scores = np.concatenate(oof_scores)
+    metadata["score_count"] = int(len(raw_oof_scores))
+    if len(raw_oof_scores) < OOF_CALIBRATION_MIN_SCORES:
+        metadata["fallback"] = (
+            f"OOF予測数不足 ({len(raw_oof_scores)} < {OOF_CALIBRATION_MIN_SCORES})"
+        )
+        return None, metadata
+    percentiles = np.linspace(0, 100, 21)
+    return np.percentile(raw_oof_scores, percentiles).tolist(), metadata
+
+
+def blend_classifier_and_ranker_scores(
+    classifier_scores, ranker_scores, weight: float = RANKER_BLEND_WEIGHT
+) -> np.ndarray:
+    """分類モデルの較正済みスコアとランカーの較正済みスコアを加重平均する。
+
+    ranker_scoresがNone(ランカー未対応の旧モデル世代など)の場合は分類モデルのみで返す
+    (後方互換)。weight=0で分類のみ、1でランカーのみになる。
+    """
+    classifier_scores = np.asarray(classifier_scores, dtype=float)
+    if ranker_scores is None:
+        return classifier_scores
+    ranker_scores = np.asarray(ranker_scores, dtype=float)
+    return classifier_scores * (1 - weight) + ranker_scores * weight
+
+
 def _feature_value(row: pd.Series, column: str, default: float = 0.0) -> float:
     """特徴量の欠損や未定義を安全に中立値へ寄せる"""
     value = row.get(column, default)
@@ -627,8 +830,19 @@ def regime_adjusted_base_threshold(
     base_threshold: float,
     row: pd.Series,
     market_regime_threshold_offsets: dict[str, float] | None = None,
+    is_sector_specific: bool = False,
 ) -> float:
-    """検証期間で採用した局面別の上乗せ幅を共通/業種しきい値へ適用する。"""
+    """検証期間で採用した局面別の上乗せ幅を共通しきい値へ適用する。
+
+    is_sector_specific=Trueの場合は適用しない。局面別の上乗せ幅は
+    optimize_market_regime_threshold_offsetsが「共通しきい値」を基準に検証しており、
+    業種別しきい値(sector_base_thresholdで既に上書きされた値)への効果は検証していない。
+    かつてはここで無条件に適用しており、業種別しきい値(例: 銀行業0.80)が
+    局面別オフセット(例: neutral -0.35)で下限0.50近くまで潰れ、業種別最適化が
+    実質無効化されていた(2026-09-06発見・修正)。
+    """
+    if is_sector_specific:
+        return float(base_threshold)
     offset = 0.0
     if market_regime_threshold_offsets:
         offset = float(market_regime_threshold_offsets.get(classify_market_regime(row), 0.0))
@@ -644,6 +858,18 @@ def sector_base_threshold(
     if sector and sector_thresholds and sector in sector_thresholds:
         return float(sector_thresholds[sector])
     return float(base_threshold)
+
+
+def is_sector_threshold_specific(
+    sector_thresholds: dict[str, float] | None, sector: str | None
+) -> bool:
+    """sector_base_thresholdが業種別しきい値を採用するかどうかだけを判定する。
+
+    regime_adjusted_base_thresholdへis_sector_specificとして渡し、局面別オフセットを
+    業種別しきい値には適用しない(2026-09-06、業種別最適化が局面別オフセットで
+    実質無効化されていた問題の修正)ために使う。
+    """
+    return bool(sector and sector_thresholds and sector in sector_thresholds)
 
 
 def adjusted_ml_buy_threshold(base_threshold: float, row: pd.Series) -> float:
@@ -727,21 +953,20 @@ def evaluate_threshold(
     future_returns = np.asarray(future_returns)
     if feature_rows is not None:
         sector_values = sectors.reindex(feature_rows.index) if sectors is not None else None
-        thresholds = [
-            adjusted_ml_buy_threshold(
+
+        def _row_threshold(index, row) -> float:
+            sector_value = None if sector_values is None else str(sector_values.loc[index])
+            return adjusted_ml_buy_threshold(
                 regime_adjusted_base_threshold(
-                    sector_base_threshold(
-                        threshold,
-                        sector_thresholds,
-                        None if sector_values is None else str(sector_values.loc[index]),
-                    ),
+                    sector_base_threshold(threshold, sector_thresholds, sector_value),
                     row,
                     market_regime_threshold_offsets,
+                    is_sector_specific=is_sector_threshold_specific(sector_thresholds, sector_value),
                 ),
                 row,
             )
-            for index, row in feature_rows.iterrows()
-        ]
+
+        thresholds = [_row_threshold(index, row) for index, row in feature_rows.iterrows()]
         thresholds = np.asarray(thresholds)
         blocked = feature_rows.apply(is_ml_buy_blocked, axis=1).to_numpy(dtype=bool)
         mask = (scores >= thresholds) & ~blocked
@@ -857,6 +1082,17 @@ def evaluate_model_bundle(
         return None, f"既存モデルの推論に失敗 ({exc})"
 
     scores = calibrate_scores(raw_scores, bundle.get("score_calibration"))
+    ranker = bundle.get("ranker_model")
+    ranker_calibration = bundle.get("ranker_score_calibration")
+    if ranker is not None and ranker_calibration:
+        try:
+            ranker_raw_scores = ranker.predict(evaluation_df[features])
+            ranker_scores = calibrate_scores(ranker_raw_scores, ranker_calibration)
+            scores = blend_classifier_and_ranker_scores(
+                scores, ranker_scores, float(bundle.get("ranker_blend_weight", RANKER_BLEND_WEIGHT))
+            )
+        except (KeyError, ValueError) as exc:
+            print(f"既存モデルのランカー推論に失敗、分類モデルのみで評価します ({exc})")
     max_daily_candidates = int(
         bundle.get("training_config", {}).get("max_daily_ml_buy_candidates", 0) or 0
     )
@@ -1075,7 +1311,22 @@ def run_walk_forward_validation(
                 model.predict_proba(train_df[selected_features])[:, 1], np.linspace(0, 100, 21)
             ).tolist()
 
-        val_scores = calibrate_scores(model.predict_proba(val_df[selected_features])[:, 1], calibration_values)
+        # ランキング学習(本番と同じ考え方)。walk-forwardは何度も繰り返す検証のため、
+        # ランカーのOOF較正は本番学習ほど厳密にはせず、学習fold内の予測分布で較正する
+        # (in-sample percentile、分類モデルがOOF不可時に使うフォールバックと同じ考え方)。
+        fold_ranker = train_ranker_model(
+            train_df[selected_features], train_df["future_excess_return"], train_df["date"]
+        )
+        fold_ranker_calibration = np.percentile(
+            fold_ranker.predict(train_df[selected_features]), np.linspace(0, 100, 21)
+        ).tolist()
+
+        def fold_blended_scores(X: pd.DataFrame) -> np.ndarray:
+            classifier_scores = calibrate_scores(model.predict_proba(X)[:, 1], calibration_values)
+            ranker_scores = calibrate_scores(fold_ranker.predict(X), fold_ranker_calibration)
+            return blend_classifier_and_ranker_scores(classifier_scores, ranker_scores, RANKER_BLEND_WEIGHT)
+
+        val_scores = fold_blended_scores(val_df[selected_features])
         threshold, _ = optimize_ml_buy_threshold(
             val_scores, val_df["future_excess_return"].to_numpy(), val_df, dates=val_df["date"]
         )
@@ -1099,7 +1350,7 @@ def run_walk_forward_validation(
             disagreements=val_disagreements, max_ensemble_disagreement=disagreement_limit,
         )
 
-        test_scores = calibrate_scores(model.predict_proba(test_df[selected_features])[:, 1], calibration_values)
+        test_scores = fold_blended_scores(test_df[selected_features])
         test_eval = evaluate_threshold(
             test_scores, test_df["future_excess_return"].to_numpy(), threshold, test_df,
             test_df["sector_label"], sector_thresholds, regime_offsets, dates=test_df["date"],
@@ -2344,10 +2595,37 @@ def main():
           f"{calibration_values[0]:.3f} / {calibration_values[5]:.3f} / "
           f"{calibration_values[10]:.3f} / {calibration_values[15]:.3f} / {calibration_values[-1]:.3f}")
 
+    # ランキング学習(LGBMRanker): 分類モデルの確率較正は「同日内でどれが最良か」を
+    # 直接最適化しないため、超過リターン順位を直接学習するランカーを追加し、
+    # 分類モデルの較正済みスコアと平均する(RANKER_BLEND_WEIGHT参照)。
+    print("\nランキング学習(LGBMRanker)を学習中...")
+    ranker_model = train_ranker_model(X_train, train_df["future_excess_return"], train_df["date"])
+    ranker_calibration_values, ranker_calibration_metadata = build_ranker_time_series_oof_calibration(
+        X_train, train_df["future_excess_return"], train_df["date"]
+    )
+    if ranker_calibration_values is None:
+        ranker_train_scores = ranker_model.predict(X_train)
+        ranker_calibration_values = np.percentile(
+            ranker_train_scores, np.linspace(0, 100, 21)
+        ).tolist()
+        ranker_calibration_metadata["method"] = "in_sample_percentile_fallback"
+        print(f"ランカーOOFスコア較正をフォールバック: {ranker_calibration_metadata['fallback']}")
+    else:
+        print(
+            f"ランカーOOFスコア較正: {len(ranker_calibration_metadata['folds'])} folds / "
+            f"{ranker_calibration_metadata['score_count']}予測"
+        )
+
+    def blended_scores(X: pd.DataFrame) -> np.ndarray:
+        """分類モデルの較正済みスコアとランカーの較正済みスコアを平均する(以降の
+        しきい値最適化・最終評価はすべてこの合成スコアを使う)。"""
+        classifier_scores = calibrate_scores(model.predict_proba(X)[:, 1], calibration_values)
+        ranker_scores = calibrate_scores(ranker_model.predict(X), ranker_calibration_values)
+        return blend_classifier_and_ranker_scores(classifier_scores, ranker_scores, RANKER_BLEND_WEIGHT)
+
     # しきい値の最適化は検証データで行い、テストデータは最終評価専用にする。
     # モデルのスコアは選択後の特徴量で算出し、フィルター判定は全特徴量のval_df/test_dfを渡す。
-    val_raw_proba = model.predict_proba(val_df[feature_columns])[:, 1]
-    val_scores = calibrate_scores(val_raw_proba, calibration_values)
+    val_scores = blended_scores(val_df[feature_columns])
     ml_buy_threshold, threshold_results = optimize_ml_buy_threshold(
         val_scores,
         val_df["future_excess_return"].to_numpy(),
@@ -2400,8 +2678,7 @@ def main():
     print(f"採用する日次ML買い候補上限件数: {max_daily_ml_buy_candidates}件")
 
     # テストデータ(完全に未使用のデータ)でしきい値の最終評価を行う
-    test_raw_proba = model.predict_proba(test_df[feature_columns])[:, 1]
-    test_scores = calibrate_scores(test_raw_proba, calibration_values)
+    test_scores = blended_scores(test_df[feature_columns])
     test_disagreements = ensemble_disagreement(model, test_df[feature_columns])
     test_eval = evaluate_threshold(
         test_scores,
@@ -2511,6 +2788,11 @@ def main():
             "feature_version": "candlestick_news_calendar_liquidity_v4",
             "score_calibration": calibration_values,
             "score_calibration_metadata": calibration_metadata,
+            "ranker_model": ranker_model,
+            "ranker_score_calibration": ranker_calibration_values,
+            "ranker_score_calibration_metadata": ranker_calibration_metadata,
+            "ranker_blend_weight": RANKER_BLEND_WEIGHT,
+            "ranker_relevance_bins": RANKER_RELEVANCE_BINS,
             "ml_buy_threshold": ml_buy_threshold,
             "sector_ml_buy_thresholds": sector_ml_buy_thresholds,
             "threshold_results": threshold_results,
@@ -2561,6 +2843,8 @@ def main():
                 "news_feature_columns": NEWS_FEATURE_COLUMNS,
                 "calendar_feature_columns": CALENDAR_FEATURE_COLUMNS,
                 "min_avg_daily_traded_value": MIN_AVG_DAILY_TRADED_VALUE,
+                "ranker_score_calibration_method": ranker_calibration_metadata["method"],
+                "model_generations_kept": len(MODEL_GEN_PATHS),
             },
             "optuna_best_params": best,
             "optuna_best_value": study.best_value,
@@ -2592,8 +2876,11 @@ def main():
             },
         }
     if promote:
+        # 昇格が決まった候補で上書きする前に、旧model.pklをgen1へ、旧gen1をgen2へ繰り下げる。
+        # 日次推論(fetch_and_signal.py)が現行+直近2世代のスコアを平均するために使う。
+        rotate_model_generations()
         joblib.dump(candidate_bundle, MODEL_PATH)
-        print(f"\n候補モデルを {MODEL_PATH} に保存しました")
+        print(f"\n候補モデルを {MODEL_PATH} に保存しました(モデル世代を繰り下げ済み)")
     else:
         print("\n既存モデルを維持しました。候補モデルは保存しません。")
 

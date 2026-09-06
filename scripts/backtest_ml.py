@@ -35,6 +35,7 @@ from train_model import (
     optimize_market_regime_threshold_offsets,
     optimize_sector_thresholds,
     sector_base_threshold,
+    is_sector_threshold_specific,
     regime_adjusted_base_threshold,
     FEATURE_COLUMNS,
     HORIZON_DAYS,
@@ -229,11 +230,13 @@ def simulate_ml(
     i = start_idx
     n = len(hist)
     base_threshold = sector_base_threshold(threshold, sector_thresholds, sector)
+    sector_specific = is_sector_threshold_specific(sector_thresholds, sector)
     while i < n - 1 - hold_days:
         score = df.iloc[i]["ml_score"]
         effective_threshold = adjusted_ml_buy_threshold(
             regime_adjusted_base_threshold(
-                base_threshold, df.iloc[i], market_regime_threshold_offsets
+                base_threshold, df.iloc[i], market_regime_threshold_offsets,
+                is_sector_specific=sector_specific,
             ),
             df.iloc[i],
         )
@@ -344,7 +347,8 @@ def selected_walk_forward_returns(
         base_threshold = sector_base_threshold(threshold, sector_thresholds, sector)
         effective_threshold = adjusted_ml_buy_threshold(
             regime_adjusted_base_threshold(
-                base_threshold, feature_row, market_regime_threshold_offsets
+                base_threshold, feature_row, market_regime_threshold_offsets,
+                is_sector_specific=is_sector_threshold_specific(sector_thresholds, sector),
             ),
             feature_row,
         )

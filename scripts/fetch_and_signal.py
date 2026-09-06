@@ -30,6 +30,13 @@ from supabase import create_client
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "model.pkl")
 
+# モデル世代の時間軸アンサンブル用。train_model.pyのrotate_model_generationsが
+# 昇格時にmodel.pkl→model_gen1.pkl→model_gen2.pklの順で繰り下げ保存する。
+MODEL_GEN_PATHS = [
+    os.path.join(os.path.dirname(__file__), "model_gen1.pkl"),
+    os.path.join(os.path.dirname(__file__), "model_gen2.pkl"),
+]
+
 # モデルに最適化済みしきい値がない場合の後方互換用デフォルト値
 ML_BUY_THRESHOLD = 0.55
 
@@ -89,6 +96,24 @@ def load_ml_model():
         return None
 
 
+def load_model_generations() -> list:
+    """直近の旧モデル世代(model_gen1.pkl/model_gen2.pkl)を読み込む。
+
+    月次再学習ごとの成績のブレを、複数世代のスコア平均で緩和するために使う
+    (2026-09-06追加)。世代ファイルが無い・壊れている場合は静かに無視する
+    (導入直後や世代蓄積前の環境では、従来通り現行モデル単体で動く)。
+    """
+    generations = []
+    for path in MODEL_GEN_PATHS:
+        try:
+            generations.append(joblib.load(path))
+        except FileNotFoundError:
+            continue
+        except Exception as exc:
+            print(f"モデル世代の読み込みに失敗、無視します ({path}): {exc}")
+    return generations
+
+
 def get_model_version(model_bundle) -> str | None:
     """保存済みモデルの内容を識別する短いバージョン文字列を返す。"""
     if model_bundle is None:
@@ -136,8 +161,15 @@ def predict_ml(
     sector=None,
     feature_df=None,
     news_sentiment: float = 0.0,
+    generation_bundles: list | None = None,
 ) -> tuple[str | None, float | None, float | None, list[str] | None]:
-    """株価履歴からML予測と、判定に使ったしきい値・見送り理由を計算する。"""
+    """株価履歴からML予測と、判定に使ったしきい値・見送り理由を計算する。
+
+    generation_bundlesを渡すと、現行モデルに加えて直近の旧モデル世代
+    (load_model_generations参照)のスコアも平均する。月次再学習ごとの成績のブレを
+    緩和するため(2026-09-06追加)。世代間で特徴量セットが異なる等の非互換は
+    その世代だけスキップし(全世代が使えない場合のみNoneを返す)、後方互換を保つ。
+    """
     if model_bundle is None:
         return None, None, None, None
 
@@ -145,41 +177,75 @@ def predict_ml(
         adjusted_ml_buy_threshold,
         build_features,
         ensemble_disagreement,
+        is_sector_threshold_specific,
         ml_buy_block_reasons,
         regime_adjusted_base_threshold,
         sector_base_threshold,
     )
 
     df = feature_df if feature_df is not None else build_features(hist, nikkei)
-    row = df.iloc[-1].copy()
+    base_row = df.iloc[-1]
 
-    # 業種one-hot特徴量を学習時と同じ形式で構築
-    for col in model_bundle.get("sector_columns", []):
-        row[col] = 1 if col == f"sector_{sector}" else 0
+    def build_bundle_row(bundle):
+        """指定した世代のモデル用に業種one-hotを組んだ特徴量行を作る。
+        必要な列が無い・NaN/非数を含む場合はNoneを返す(その世代はスキップする)。
+        """
+        row = base_row.copy()
+        for col in bundle.get("sector_columns", []):
+            row[col] = 1 if col == f"sector_{sector}" else 0
+        features = bundle.get("features", [])
+        if any(col not in row.index for col in features):
+            return None
+        feature_values = row[features]
+        if feature_values.isna().any() or not np.isfinite(feature_values.to_numpy(dtype=float)).all():
+            return None
+        return row
 
-    feature_values = row[model_bundle["features"]]
-    if feature_values.isna().any() or not np.isfinite(feature_values.to_numpy(dtype=float)).all():
+    def generation_score(bundle, row) -> float:
+        """1世代分の分類モデル較正スコアと(あれば)ランカー較正スコアを平均して返す。"""
+        features = pd.DataFrame([row[bundle["features"]]])
+        raw_score = float(bundle["model"].predict_proba(features)[0, 1])
+        calibration = bundle.get("score_calibration")
+        if calibration:
+            percentiles = [p / 100 for p in range(0, 101, 5)]
+            score = float(np.interp(raw_score, calibration, percentiles))
+        else:
+            score = raw_score
+
+        ranker = bundle.get("ranker_model")
+        ranker_calibration = bundle.get("ranker_score_calibration")
+        if ranker is not None and ranker_calibration:
+            ranker_raw = float(ranker.predict(features)[0])
+            percentiles = [p / 100 for p in range(0, 101, 5)]
+            ranker_score = float(np.interp(ranker_raw, ranker_calibration, percentiles))
+            weight = float(bundle.get("ranker_blend_weight", 0.5))
+            score = score * (1 - weight) + ranker_score * weight
+
+        # 新モデルは時系列ニュース特徴量を直接学習する。旧モデルだけは従来の
+        # 単発7日平均による補正を残し、再学習・昇格までの挙動を変えない。
+        if not any(column.startswith("news_") for column in bundle["features"]):
+            score = score + news_sentiment * NEWS_SENTIMENT_WEIGHT
+        return min(max(score, 0.0), 1.0)
+
+    row = build_bundle_row(model_bundle)
+    if row is None:
         return None, None, None, None
 
     features = pd.DataFrame([row[model_bundle["features"]]])
-
-    raw_score = float(model_bundle["model"].predict_proba(features)[0, 1])
     disagreement = float(ensemble_disagreement(model_bundle["model"], features)[0])
 
-    # 学習データ全体での予測確率の分布が偏っているため、分位点テーブルで0〜1に較正する。
-    # 50%が「平均的な銘柄」、両端が相対的に強気/弱気な銘柄を表す。
-    calibration = model_bundle.get("score_calibration")
-    if calibration:
-        percentiles = [p / 100 for p in range(0, 101, 5)]
-        score = float(np.interp(raw_score, calibration, percentiles))
-    else:
-        score = raw_score
+    generation_scores = [generation_score(model_bundle, row)]
+    for gen_bundle in generation_bundles or []:
+        gen_row = build_bundle_row(gen_bundle)
+        if gen_row is None:
+            continue
+        try:
+            generation_scores.append(generation_score(gen_bundle, gen_row))
+        except Exception as exc:
+            print(f"モデル世代のスコア計算に失敗、この世代をスキップ: {exc}")
+    score = sum(generation_scores) / len(generation_scores)
 
-    # 新モデルは時系列ニュース特徴量を直接学習する。旧モデルだけは従来の
-    # 単発7日平均による補正を残し、再学習・昇格までの挙動を変えない。
-    if not any(column.startswith("news_") for column in model_bundle["features"]):
-        score = score + news_sentiment * NEWS_SENTIMENT_WEIGHT
-    score = min(max(score, 0.0), 1.0)
+    sector_specific = is_sector_threshold_specific(model_bundle.get("sector_ml_buy_thresholds"), sector)
     base_threshold = sector_base_threshold(
         float(model_bundle.get("ml_buy_threshold", ML_BUY_THRESHOLD)),
         model_bundle.get("sector_ml_buy_thresholds"),
@@ -190,6 +256,7 @@ def predict_ml(
             base_threshold,
             row,
             model_bundle.get("market_regime_thresholds", {}).get("offsets", {}),
+            is_sector_specific=sector_specific,
         ),
         row,
     )
@@ -717,6 +784,10 @@ def main():
     sb = create_client(url, key)
     model_bundle = load_ml_model()
     model_version = get_model_version(model_bundle)
+    # 直近の旧モデル世代とスコアを平均し、月次再学習ごとの成績のブレを緩和する
+    model_generations = load_model_generations() if model_bundle is not None else []
+    if model_generations:
+        print(f"モデル世代アンサンブル: 現行 + 過去{len(model_generations)}世代のスコアを平均")
     nikkei = None
     if model_bundle is not None:
         from train_model import get_nikkei_returns
@@ -877,6 +948,7 @@ def main():
             jp_sectors.get(ticker),
             feature_frames.get(ticker),
             news_sentiment.get(ticker, 0.0),
+            model_generations,
         )
 
         # 決算前後フィルター: 買い候補のみ決算日を確認してブロック

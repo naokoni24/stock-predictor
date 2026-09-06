@@ -31,10 +31,17 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          if git diff --quiet -- scripts/model.pkl; then
-            echo "model.pkl unchanged, skip commit"
+          # model.pklに加え、モデル世代アンサンブル用のmodel_gen1.pkl/model_gen2.pkl
+          # (昇格時のみrotate_model_generationsが作成・更新する)も対象に含める。
+          # 初回導入直後はgen1/gen2がまだ存在しないため、存在するファイルだけ追加する。
+          for f in scripts/model.pkl scripts/model_gen1.pkl scripts/model_gen2.pkl; do
+            if [ -f "$f" ]; then
+              git add "$f"
+            fi
+          done
+          if git diff --cached --quiet; then
+            echo "model unchanged, skip commit"
           else
-            git add scripts/model.pkl
             git commit -m "monthly retrain: update model.pkl"
             git push
           fi
