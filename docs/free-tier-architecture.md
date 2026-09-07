@@ -108,7 +108,7 @@ GitHub Actionsのログに以下を出す。
 
 #### スケジュール未発火に対するフェイルセーフ(2026-09-03追加)
 
-`daily-signals.yml`の15:37 JST本実行・17:12 JST修復実行はどちらもGitHub Actionsの
+`daily-signals.yml`の本実行・修復実行はどちらもGitHub Actionsの
 `schedule`イベントに依存しており、GitHub側でscheduled workflowが高負荷時に遅延・
 欠落する可能性がある(GitHub公式案内)。これは新しい有料の外部監視サービスを追加
 せず、既存の無料枠(Vercel Hobby Cron Jobs)だけで独立したフェイルセーフとして
@@ -119,13 +119,17 @@ GitHub Actionsのログに以下を出す。
   同日中にGitHub Actions側のcron分調整に合わせて:52/:07へ再調整。
   Hobbyでもcron jobは1プロジェクトあたり最大100個まで登録可、各jobは1日1回まで
   という制約なので、複数jobを立てること自体は無料枠内)登録し、
-  `src/app/api/cron/repair-check/route.ts`を呼び出す。1回目(17:52)は17:12修復
-  実行の想定遅延(実績30〜40分)を見込んだ早期検知、2回目(19:07)は1回目の
-  Vercel Cron自体が飛んだ場合の最終保険。判定ロジックが冪等(queued/in_progress/
-  success済みなら何もしない)なので、2本立てても正規の実行やもう一方のcronと
-  競合しない。GitHub Actions側のdaily-signals.ymlのcron分も、キリの良い:30/:00
-  (GitHub公式が混雑しやすいと案内する時間帯)を避けて:37/:12へ変更した
-  (2026-09-04)。
+  `src/app/api/cron/repair-check/route.ts`を呼び出す。判定ロジックが冪等
+  (queued/in_progress/success済みなら何もしない)なので、2本立てても正規の実行や
+  もう一方のcronと競合しない。
+  GitHub Actions側のdaily-signals.ymlのcronは当初、東証取引終了(15:00 JST)後の
+  15:30/17:00に設定していたが、キリの良い分がGitHub公式の言う混雑時間帯に当たる
+  ことを避けて15:37/17:12へ調整(2026-09-04)。しかしその後も改善せず、
+  2026-09-04〜06の3日間の実測でscheduleイベント自体が4〜6時間規模で恒常的に
+  遅延することが判明したため、`scripts/fetch_and_signal.py`側の安全策
+  (`MARKET_CLOSE_HOUR_JST`、取引終了前の実行時は当日分を除外するため前倒しして
+  も実害がない)を前提に、本実行11:37 JST・修復実行13:37 JSTへ大きく前倒しした
+  (2026-09-07)。
 - このAPIはGitHub REST APIで`daily-signals.yml`の本日(JST)分の実行履歴を確認し、
   queued/in_progress中、または既にsuccessで完了した実行が1件もない場合だけ、
   修復モード(`repair_only=1`)で`workflow_dispatch`を起動する。
