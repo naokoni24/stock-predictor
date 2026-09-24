@@ -34,6 +34,7 @@ from train_model import (
     optimize_ensemble_disagreement,
     optimize_market_regime_threshold_offsets,
     optimize_sector_thresholds,
+    repair_price_glitches,
     sector_base_threshold,
     is_sector_threshold_specific,
     regime_adjusted_base_threshold,
@@ -100,7 +101,7 @@ def load_history() -> dict[str, pd.DataFrame]:
         hist = yf.Ticker(ticker).history(period=TRAIN_HISTORY_PERIOD)
         if hist.empty:
             continue
-        hist = hist.reset_index()
+        hist = repair_price_glitches(hist.reset_index())
         hist["sma25"] = hist["Close"].rolling(25).mean()
         hist["sma75"] = hist["Close"].rolling(75).mean()
         hist["rsi14"] = calc_rsi(hist["Close"], 14)

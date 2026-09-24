@@ -42,6 +42,12 @@ ML_BUY_THRESHOLD = 0.55
 
 # 無料枠で毎日安定運用するため、重い株価取得・指標計算の対象数を制限する
 MAX_DAILY_TICKERS = 150
+
+# 日次推論で取得する株価履歴の期間。ML特徴量のprice_position_52wは学習時に
+# 最大252営業日の高安値から計算するため、6moでは実質「6か月高安値位置」となり
+# 学習と推論で特徴量の意味がずれていた(2026-09-24に発見、主要20銘柄で平均0.14の乖離)。
+# 252営業日を確保できる2yで取得する。pricesテーブルへの保存は直近30行のみのためDB容量は変わらない。
+INFERENCE_HISTORY_PERIOD = "2y"
 SCREENER_SIZE = 50
 PREVIOUS_SIGNAL_LIMIT = 50
 
@@ -822,7 +828,7 @@ def main():
     all_price_rows = []
     close_validation = {}
     for ticker in all_tickers:
-        hist = yf.Ticker(ticker).history(period="6mo")
+        hist = yf.Ticker(ticker).history(period=INFERENCE_HISTORY_PERIOD)
         if hist.empty:
             print(f"skip {ticker}: no data")
             continue

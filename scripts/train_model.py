@@ -68,10 +68,27 @@ MIN_AVG_DAILY_TRADED_VALUE = 100_000_000
 STOP_LOSS_PCT = 0.08
 
 # 学習・walk-forward評価に使う株価履歴の期間。
-# 3年に伸ばす検証を2026-07に実施したが、テスト期間(2026-02〜06)の成績が
-# 2年版(net+1.36%/取引)から明確に悪化(+0.46%、しきい値安定化後も+0.03%)したため
-# 2年へ戻した。直近重み付けだけでは古い地合いの混入を相殺できなかったと判断。
-TRAIN_HISTORY_PERIOD = "2y"
+# 2026-07に3年化を試して悪化と判断し2年へ戻したが、当時の比較はテスト期間が異なり、
+# 評価も外れ値(TOB等の+100%超リターン、1306.Tの桁ずれ)込みの平均で行っていた。
+# 2026-09-24に外れ値処理後・同一テスト期間(直近6期間×35営業日)で比較し直したところ、
+# 5年学習は2年学習より日次順位相関(IC)が0.083→0.117へ改善した。5年にすると
+# 52週特徴量のウォームアップ後の学習行が約1.6年→約4.6年に増え、テスト期間(末尾15%)も
+# 長くなるため、しきい値選択・昇格判定のノイズも小さくなる。
+# 直近重み付け(半減期365日)により4年以上前のデータの重みは1/16以下に抑えられる。
+TRAIN_HISTORY_PERIOD = "5y"
+
+# yfinanceは稀に1〜2日だけ価格が1/10になる等の桁ずれデータを返す
+# (実例: 1306.Tの2026-03-30〜31)。前後PRICE_GLITCH_WINDOW日の終値中央値から
+# PRICE_GLITCH_MAX_RATIO倍以上乖離した日は欠損扱いにし、前日値で埋める。
+# 放置するとTOPIXベンチマークが+946%/-90%になり、その日の学習ラベルが壊れる。
+PRICE_GLITCH_WINDOW = 11
+PRICE_GLITCH_MAX_RATIO = 3.0
+
+# 実現リターン・超過リターンの打ち切り幅(±30%)。TOB発表などで5営業日+100%超の
+# 銘柄が1件あるだけで、同日・同業種ベンチマーク(平均)や、しきい値選択・昇格判定に
+# 使う平均リターンが大きく振れる。ラベル(+0.5%以上か)への影響は小さく、
+# 評価の頑健性を優先して打ち切る。
+RETURN_WINSOR_LIMIT = 0.30
 
 # 直近データを重視するサンプル重みの半減期(日)。小さいほど直近を重視する。
 # 半減期365日なら、1年前のデータは重み0.5、2年前は0.25、3年前は0.125になる。
@@ -1848,6 +1865,30 @@ def optimize_max_daily_candidates(
     return best["max_daily_candidates"], results
 
 
+def repair_price_glitches(hist: pd.DataFrame) -> pd.DataFrame:
+    """yfinanceの桁ずれ価格(前後の終値中央値からPRICE_GLITCH_MAX_RATIO倍以上の乖離)を補修する。
+
+    該当日のOHLCを欠損扱いにして前日値で埋める。行は削除しないため、
+    営業日数ベースの保有期間(compute_barrier_outcome)の位置関係は変わらない。
+    中央値は前後の日を使うが、明らかな異常値を置き換えるだけで予測に使う情報は増えない。
+    """
+    price_columns = [c for c in ["Open", "High", "Low", "Close"] if c in hist.columns]
+    if hist.empty or "Close" not in price_columns:
+        return hist
+    reference = hist["Close"].rolling(PRICE_GLITCH_WINDOW, center=True, min_periods=3).median()
+    glitch = pd.Series(False, index=hist.index)
+    for column in price_columns:
+        ratio = hist[column] / reference
+        glitch |= (ratio > PRICE_GLITCH_MAX_RATIO) | (ratio < 1 / PRICE_GLITCH_MAX_RATIO)
+    if not glitch.any():
+        return hist
+    repaired = hist.copy()
+    repaired.loc[glitch, price_columns] = np.nan
+    repaired[price_columns] = repaired[price_columns].ffill()
+    print(f"price glitch repaired: {int(glitch.sum())} row(s)")
+    return repaired
+
+
 def build_market_features(symbols: str | list[str], prefix: str) -> pd.DataFrame:
     """市場指数・為替データを同じ形式の特徴量へ変換"""
     if isinstance(symbols, str):
@@ -1870,7 +1911,7 @@ def build_market_features(symbols: str | list[str], prefix: str) -> pd.DataFrame
         return pd.DataFrame(columns=["date"] + [f"{prefix}_{m}" for m in MARKET_METRICS])
 
     print(f"market data loaded: {prefix}={used_symbol}")
-    hist = hist.reset_index()
+    hist = repair_price_glitches(hist.reset_index())
     source_dates = pd.to_datetime(hist["Date"])
     if prefix in MARKET_DATA_AVAILABLE_NEXT_JP_BUSINESS_DAY:
         # 祝日は日本市場の行がないため、build_featuresのforward fillによって
@@ -2260,7 +2301,13 @@ def add_excess_return_targets(
         source["_sector"] = sectors.get(ticker, "不明")
         if "topix_benchmark_return" not in source.columns:
             source["topix_benchmark_return"] = np.nan
-        source["future_return"] = compute_barrier_outcome(source)[1]
+        # 外れ値(TOB等)1件で同日・同業種の平均ベンチマークが振れないよう打ち切る
+        source["future_return"] = compute_barrier_outcome(source)[1].clip(
+            -RETURN_WINSOR_LIMIT, RETURN_WINSOR_LIMIT
+        )
+        source["topix_benchmark_return"] = source["topix_benchmark_return"].clip(
+            -RETURN_WINSOR_LIMIT, RETURN_WINSOR_LIMIT
+        )
         prepared[ticker] = source
         rows.append(source[["date", "_ticker", "_sector", "future_return", "topix_benchmark_return"]])
 
@@ -2288,7 +2335,7 @@ def add_excess_return_targets(
     )
     benchmarks["future_excess_return"] = (
         benchmarks["future_return"] - benchmarks["benchmark_return"]
-    )
+    ).clip(-RETURN_WINSOR_LIMIT, RETURN_WINSOR_LIMIT)
     benchmarks["label"] = np.where(
         benchmarks["future_excess_return"].notna(),
         (benchmarks["future_excess_return"] >= EXCESS_RETURN_TARGET).astype(float),
@@ -2363,7 +2410,7 @@ def build_dataset() -> pd.DataFrame:
         hist = yf.Ticker(ticker).history(period=TRAIN_HISTORY_PERIOD)
         if hist.empty:
             continue
-        hist = hist.reset_index()
+        hist = repair_price_glitches(hist.reset_index())
         hist["sma25"] = hist["Close"].rolling(25).mean()
         hist["sma75"] = hist["Close"].rolling(75).mean()
         hist["rsi14"] = calc_rsi(hist["Close"], 14)
