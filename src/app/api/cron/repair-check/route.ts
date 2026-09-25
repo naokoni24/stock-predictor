@@ -4,8 +4,8 @@ import { NextRequest, NextResponse } from "next/server";
  * GitHub Actions(daily-signals.yml)の日次スケジュール実行が大幅に遅延・未発火の
  * ときだけ、修復モード(REPAIR_MISSING_CLOSES_ONLY)でworkflow_dispatchを起動する。
  *
- * 15:37 JSTの本実行・17:12 JSTの修復実行はどちらもGitHub Actionsの`schedule`
- * イベントに依存しており、GitHub側のスケジュール配送遅延には対処できない
+ * 11:37 JSTの本実行・13:37 JSTの修復実行(2026-09-07に前倒し。実測では4〜6時間遅れて
+ * 16〜19時台に発火している)はどちらもGitHub Actionsの`schedule`イベントに依存しており、GitHub側のスケジュール配送遅延には対処できない
  * (GitHub公式もscheduled workflowが高負荷時に遅延・欠落しうると案内しており、
  * 特に毎時ちょうど等キリの良い時刻は混雑しやすいと明記している。2026-09-04に
  * 本実行:30・修復実行:00がどちらも未発火する事象が発生したため、daily-signals.yml
@@ -14,7 +14,7 @@ import { NextRequest, NextResponse } from "next/server";
  * 2026-09-04に17:45を追加して二段構成化、同日中に:45/:00→:52/:07へ再調整)
  * から呼び出され、GitHub Actions基盤とは独立した経路でフェイルセーフとして
  * 機能する。
- * 1回目(17:52)は17:12修復実行の想定遅延を見込んだ早期検知、2回目(19:07)は
+ * 1回目(17:52)は本実行・修復実行の想定遅延を見込んだ早期検知、2回目(19:07)は
  * 1回目のVercel Cron自体が飛んだ場合の最終保険。判定ロジックが冪等
  * (queued/in_progress/success済みなら何もしない)なので、2本立てても
  * 正規の実行と競合しない。
@@ -22,11 +22,16 @@ import { NextRequest, NextResponse } from "next/server";
  * 2026-09-04時点ではcron分の調整が実際に発火安定性を改善するかは未検証。
  * 2026-09-08週以降の実行実績(gh run list)を見て、必要ならさらに調整する。
  *
- * 判定ロジック(2026-09-03):
- * - 本日(JST)分のdaily-signals実行が既にqueued/in_progressなら何もしない。
- * - 本日(JST)分のdaily-signals実行が既にsuccessで完了していれば何もしない。
- * - どちらにも該当しない(=本日分の実行が1件も無い、または失敗のみ)場合だけ、
- *   修復モードでworkflow_dispatchを起動する。
+ * 判定ロジック(2026-09-03、2026-09-26修正):
+ * - 本日(JST)の取引終了(15:00 JST)以降に開始したdaily-signals実行だけを数える。
+ *   取引終了前に開始した実行は当日分を除外して前営業日までしか処理しないため
+ *   (scripts/fetch_and_signal.pyのMARKET_CLOSE_HOUR_JST)、それを「成功済み」と
+ *   みなすと当日終値が翌日まで反映されない。スケジュール遅延が縮まり11:37/13:37に
+ *   定刻発火した日にこの状態になるため、以前の「本日0時以降」基準から変更した。
+ * - 上記の実行が既にqueued/in_progressなら何もしない。
+ * - 上記の実行が既にsuccessで完了していれば何もしない。
+ * - どちらにも該当しない場合だけ、修復モードでworkflow_dispatchを起動する。
+ *   当日のシグナルが未保存ならスクリプト側で通常モードへ切り替わる。
  *
  * データ欠損の妥当性検証自体はscripts/fetch_and_signal.py側(代表4銘柄の
  * 終値チェック)が既に行っており、取引日なのに欠損していればジョブがfailする
@@ -44,18 +49,22 @@ type WorkflowRun = {
   status: string; // "queued" | "in_progress" | "completed" など
   conclusion: string | null;
   created_at: string;
+  run_started_at?: string | null;
   html_url: string;
 };
 
-/** JST基準の「今日0時」をUTCのISO文字列で返す(JSTはUTC+9固定、サマータイムなし)。 */
-function startOfTodayJstAsUtcIso(): string {
+// 東証の取引終了時刻(JST)。scripts/fetch_and_signal.pyのMARKET_CLOSE_HOUR_JSTと同じ値。
+const MARKET_CLOSE_HOUR_JST = 15;
+
+/** JST基準の「今日の取引終了時刻」をUTCのISO文字列で返す(JSTはUTC+9固定、サマータイムなし)。 */
+function todayMarketCloseJstAsUtcIso(): string {
   const now = new Date();
   const jstNow = new Date(now.getTime() + 9 * 60 * 60 * 1000);
   const y = jstNow.getUTCFullYear();
   const m = jstNow.getUTCMonth();
   const d = jstNow.getUTCDate();
-  const startOfTodayJstUtcMs = Date.UTC(y, m, d, 0, 0, 0) - 9 * 60 * 60 * 1000;
-  return new Date(startOfTodayJstUtcMs).toISOString();
+  const closeJstUtcMs = Date.UTC(y, m, d, MARKET_CLOSE_HOUR_JST, 0, 0) - 9 * 60 * 60 * 1000;
+  return new Date(closeJstUtcMs).toISOString();
 }
 
 function githubHeaders(token: string) {
@@ -97,8 +106,12 @@ export async function GET(req: NextRequest) {
     workflow_runs: WorkflowRun[];
   };
 
-  const todayStartIso = startOfTodayJstAsUtcIso();
-  const todaysRuns = runs.filter((r) => r.created_at >= todayStartIso);
+  // 取引終了後に開始した実行だけが当日終値を処理できる。queuedの実行は開始前のため
+  // run_started_atが無い(または作成時刻と同じ)場合があり、その場合はcreated_atで判定する。
+  const marketCloseIso = todayMarketCloseJstAsUtcIso();
+  const todaysRuns = runs.filter(
+    (r) => (r.run_started_at ?? r.created_at) >= marketCloseIso
+  );
 
   const inFlight = todaysRuns.find(
     (r) => r.status === "queued" || r.status === "in_progress"
@@ -143,7 +156,7 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.json({
     action: "dispatched",
-    reason: "no successful run found for today",
+    reason: "no successful run found after today's market close",
     todaysRunsChecked: todaysRuns.length,
   });
 }

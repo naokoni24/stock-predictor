@@ -49,11 +49,32 @@ function isMissingMlExplanationColumn(error: { message?: string | null; code?: s
 }
 
 async function fetchWatchlists() {
+  // 「本日のおすすめ」は最新の市場日に分析した銘柄だけから選ぶ。以前は直近800件の
+  // シグナルから銘柄ごとの最新行を集めていたため、今日の分析対象から外れた銘柄
+  // (数日前のスクリーナー銘柄など)の古いシグナルが混ざり、2026-09-26時点で
+  // 買い候補10件中6件・売り候補10件中8件が9/16〜9/24の古いシグナルだった。
+  // yfinanceが終値を確定配信していない行(close=null)は最新日の判定に使わない。
+  const { data: latestDateRow, error: latestDateError } = await supabase
+    .from("signals")
+    .select("date")
+    .not("close", "is", null)
+    .order("date", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  const latestDate = latestDateRow?.date;
+  if (latestDateError || !latestDate) {
+    const empty: Row[] = [];
+    return {
+      buy: { rows: empty, error: latestDateError },
+      sell: { rows: empty, error: latestDateError },
+    };
+  }
+
   const initialResult = await supabase
     .from("signals")
     .select("ticker, date, close, rsi14, signal, score, ml_signal, ml_score, ml_threshold, ml_block_reasons, stocks(name, sector)")
-    .order("date", { ascending: false })
-    .limit(800);
+    .eq("date", latestDate)
+    .limit(1000);
   let signals = initialResult.data;
   let error = initialResult.error;
 
@@ -62,8 +83,8 @@ async function fetchWatchlists() {
     const legacyResult = await supabase
       .from("signals")
       .select("ticker, date, close, rsi14, signal, score, ml_signal, ml_score, stocks(name, sector)")
-      .order("date", { ascending: false })
-      .limit(800);
+      .eq("date", latestDate)
+      .limit(1000);
     signals = legacyResult.data?.map((row) => ({
       ...row,
       ml_threshold: null,
@@ -72,16 +93,8 @@ async function fetchWatchlists() {
     error = legacyResult.error;
   }
 
-  // 銘柄ごとに最新日のシグナルのみを残す(買い/売り候補どちらのタブでも同じ最新日を使う)。
-  // yfinanceが当日終値をまだ確定配信していない日はclose/signalがnullで保存されるため、
-  // そのような行はスキップして直近の有効な行を使う。
-  const latestByTicker = new Map<string, NonNullable<typeof signals>[number]>();
-  for (const s of signals ?? []) {
-    if (!latestByTicker.has(s.ticker) && s.close != null) {
-      latestByTicker.set(s.ticker, s);
-    }
-  }
-  const latest = Array.from(latestByTicker.values());
+  // 終値が未確定(null)の行は候補から外す。
+  const latest = (signals ?? []).filter((s) => s.close != null);
 
   const buildRows = (signalType: "buy_candidate" | "sell_candidate"): Row[] =>
     latest

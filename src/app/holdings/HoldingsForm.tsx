@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { ChevronDown, PlusCircle } from "lucide-react";
 import { addHolding } from "./actions";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -29,9 +29,14 @@ export default function HoldingsForm({
   // 状態で、削除前の折りたたみ状態(open=false)が残ったままヘッダーのクリック
   // ハンドラも外れ(collapsedByDefault=falseのため)、追加ボタンを押しても
   // フォームが表示されない不具合になる。
-  useEffect(() => {
+  // useEffect内でsetStateするとlint(react-hooks/set-state-in-effect)に抵触し
+  // 1フレーム古い状態で描画されるため、Reactが推奨する「前回のpropsを覚えておき
+  // レンダー中に差分を検出して状態を調整する」方式で同期する。
+  const [prevCollapsedByDefault, setPrevCollapsedByDefault] = useState(collapsedByDefault);
+  if (prevCollapsedByDefault !== collapsedByDefault) {
+    setPrevCollapsedByDefault(collapsedByDefault);
     setOpen(!collapsedByDefault);
-  }, [collapsedByDefault]);
+  }
 
   return (
     <Card className="border-2 border-primary shadow-md py-0 gap-0 overflow-hidden">

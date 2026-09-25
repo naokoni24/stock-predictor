@@ -15,7 +15,8 @@ on:
     - cron: "37 2 * * *"
     # 通常更新で終値が欠損・未更新だった銘柄だけを13:37 JST (UTC 04:37) に再取得する
     # (2026-09-07、17:12→13:37に前倒し。理由は本実行と同じ)。
-    # 同じ全銘柄処理を繰り返さず無料枠消費を抑える。
+    # 同じ全銘柄処理を繰り返さず無料枠消費を抑える。本実行が取引終了前に発火して
+    # 当日分を処理できていない場合は、スクリプト側で通常モードへ切り替わる。
     - cron: "37 4 * * *"
   workflow_dispatch:
     inputs:
@@ -52,29 +53,39 @@ jobs:
       - name: Install dependencies
         run: pip install -r scripts/requirements.txt
 
+      # スケジュール実行は2本とも修復モード(REPAIR_MISSING_CLOSES_ONLY=1)で起動し、
+      # 直近の市場日のシグナルが未保存ならスクリプト側で通常モードへ切り替える
+      # (2026-09-26変更)。以前は修復実行の判定が旧cron('0 8 * * *')のまま残っており、
+      # 2本目も毎回通常モードで全銘柄を再処理していた。さらに土日祝のスケジュール実行も
+      # 直前営業日を通常モードで再処理しており、日ごとにユニバースが変わるため、
+      # 同じ市場日のAI買い候補が上限20件を超えていた。
+      # 手動実行(workflow_dispatch)でrepair_only='0'を指定した場合だけ強制的に通常モード。
       - name: Run fetch and signal script
+        id: signal
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          REPAIR_MISSING_CLOSES_ONLY: ${{ (github.event.schedule == '0 8 * * *' || github.event.inputs.repair_only == '1') && '1' || '0' }}
+          REPAIR_MISSING_CLOSES_ONLY: ${{ (github.event_name == 'schedule' || github.event.inputs.repair_only == '1') && '1' || '0' }}
         run: python scripts/fetch_and_signal.py
 
+      # 実績評価・ニュース取得・保持期間処理は、本実行スケジュール(土日もニュース取得を
+      # 続けるため)か、通常モードで全銘柄を処理した実行でだけ行う。
       - name: Evaluate live AI signal outcomes
-        if: github.event.schedule != '0 8 * * *' && github.event.inputs.repair_only != '1'
+        if: github.event.schedule == '37 2 * * *' || steps.signal.outputs.mode == 'full'
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: python scripts/evaluate_signal_outcomes.py
 
       - name: Fetch market news
-        if: github.event.schedule != '0 8 * * *' && github.event.inputs.repair_only != '1'
+        if: github.event.schedule == '37 2 * * *' || steps.signal.outputs.mode == 'full'
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: python scripts/fetch_news.py
 
       - name: Apply retention policy
-        if: github.event.schedule != '0 8 * * *' && github.event.inputs.repair_only != '1'
+        if: github.event.schedule == '37 2 * * *' || steps.signal.outputs.mode == 'full'
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}

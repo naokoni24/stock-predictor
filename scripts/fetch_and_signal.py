@@ -17,6 +17,7 @@ import hashlib
 import math
 import os
 import signal
+import time
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 
@@ -65,12 +66,30 @@ MARKET_CLOSE_HOUR_JST = 15
 CLOSE_VALIDATION_TICKERS = ("7203.T", "6758.T", "9984.T", "8306.T")
 
 
+# Supabase(PostgREST)が一時的に504 Gateway Timeoutを返すことがあり、2026-09-12には
+# signalsのupsertだけが失敗してジョブ全体がfailした。一時的な失敗は間隔を空けて再試行する。
+UPSERT_MAX_ATTEMPTS = 3
+UPSERT_RETRY_WAIT_SEC = 10
+
+
 def upsert_in_chunks(table, rows, *, on_conflict=None):
     """大量行を複数リクエストに分けてupsertし、銘柄ごとの個別リクエストを避ける"""
     for i in range(0, len(rows), UPSERT_CHUNK_SIZE):
         chunk = rows[i : i + UPSERT_CHUNK_SIZE]
-        query = table.upsert(chunk, on_conflict=on_conflict) if on_conflict else table.upsert(chunk)
-        query.execute()
+        for attempt in range(1, UPSERT_MAX_ATTEMPTS + 1):
+            query = table.upsert(chunk, on_conflict=on_conflict) if on_conflict else table.upsert(chunk)
+            try:
+                query.execute()
+                break
+            except Exception as exc:
+                # カラム未追加などの恒久的なエラーは再試行しても直らないため、
+                # 504/タイムアウト等の一時的なエラーだけを再試行する。
+                message = str(exc)
+                transient = any(token in message for token in ("504", "502", "503", "Timeout", "timed out"))
+                if not transient or attempt == UPSERT_MAX_ATTEMPTS:
+                    raise
+                print(f"upsert一時エラーのため再試行します ({attempt}/{UPSERT_MAX_ATTEMPTS}): {message[:200]}")
+                time.sleep(UPSERT_RETRY_WAIT_SEC * attempt)
 
 
 def upsert_signals_with_schema_fallback(sb, rows: list[dict]):
@@ -281,8 +300,11 @@ def predict_ml(
 
 
 def limit_ml_buy_candidates(signal_rows: list[dict], max_candidates: int) -> int:
-    """ML買い候補を超過リターンスコア順で上位件数に絞り、除外数を返す。"""
-    if max_candidates <= 0:
+    """ML買い候補を超過リターンスコア順で上位件数に絞り、除外数を返す。
+
+    max_candidatesが0なら全件を除外する(同日の上限を既存行で使い切っている場合)。
+    """
+    if max_candidates < 0:
         return 0
     candidates = sorted(
         (
@@ -607,6 +629,57 @@ def is_jpx_trading_day(target_date) -> bool:
     return target_date.weekday() < 5 and not jpholiday.is_holiday(target_date) and not year_end_new_year
 
 
+def write_github_output(name: str, value: str):
+    """GitHub Actionsの後続ステップへ値を渡す(ローカル実行時は何もしない)。"""
+    output_path = os.environ.get("GITHUB_OUTPUT")
+    if not output_path:
+        return
+    with open(output_path, "a", encoding="utf-8") as output_file:
+        output_file.write(f"{name}={value}\n")
+
+
+def latest_trading_day(cutoff_date):
+    """cutoff_date以前で直近のJPX取引日を返す(土日祝・年末年始はその前の取引日)。"""
+    target = cutoff_date
+    for _ in range(14):
+        if is_jpx_trading_day(target):
+            return target
+        target -= timedelta(days=1)
+    return cutoff_date
+
+
+def has_signals_for_date(sb, target_date) -> bool:
+    """指定した市場日のシグナルが既に保存済みか(=通常更新が完了済みか)を返す。"""
+    rows = (
+        sb.table("signals")
+        .select("ticker")
+        .eq("date", target_date.isoformat())
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
+    return bool(rows)
+
+
+def count_other_ml_buy_candidates(sb, target_date, processed_tickers) -> int:
+    """同じ市場日で、今回処理しなかった銘柄に既に付いているAI買い候補の件数を返す。
+
+    同じ市場日を複数回処理する場合(修復実行、手動の再実行など)に、実行ごとに
+    上位N件を選ぶと当日の合計がNを超えてしまうため、既存分を上限から差し引く。
+    """
+    rows = (
+        sb.table("signals")
+        .select("ticker")
+        .eq("date", target_date.isoformat())
+        .eq("ml_signal", "buy_candidate")
+        .execute()
+        .data
+        or []
+    )
+    return sum(1 for row in rows if row["ticker"] not in processed_tickers)
+
+
 def select_repair_tickers(sb, jp_names: dict[str, str], target_date) -> dict[str, str]:
     """夕方の再取得では、当日終値が欠損・未更新の優先銘柄だけを対象にする。"""
     try:
@@ -740,6 +813,10 @@ def make_signal(row) -> tuple[str | None, float]:
     score = 0.0
     signal = "hold"
     macd_diff = row["macd"] - row["macd_signal"]
+    # MACD差は円単位のため、そのままスコアに足すと株価の桁が大きい銘柄ほど
+    # スコアの絶対値が極端に大きくなり(例: 株価数十万円のREITで売りスコア-805)、
+    # 並び順がほぼ株価水準で決まっていた(2026-09-26修正)。株価に対する%へ正規化する。
+    macd_diff_pct = macd_diff / row["Close"] * 100 if row["Close"] > 0 else 0.0
     bb_width = row["bb_upper"] - row["bb_lower"]
     bb_position = (row["Close"] - row["bb_lower"]) / bb_width if bb_width > 0 else None
 
@@ -756,7 +833,7 @@ def make_signal(row) -> tuple[str | None, float]:
         score += max(0, 50 - row["rsi14"]) * 0.1
 
         # MACDがシグナルを上回っている(上昇モメンタム)ほど加点
-        score += macd_diff * 2
+        score += macd_diff_pct * 2
 
         # ボリンジャーバンド下限近くは押し目買いとして加点
         if bb_position is not None and bb_position < 0.3:
@@ -775,7 +852,7 @@ def make_signal(row) -> tuple[str | None, float]:
 
         # MACDがシグナルを下回っている(下落モメンタム)ほど減点
         if macd_diff < 0:
-            score += macd_diff * 2
+            score += macd_diff_pct * 2
 
         # ボリンジャーバンド上限近くは過熱として減点
         if bb_position is not None and bb_position > 0.7:
@@ -806,16 +883,32 @@ def main():
         # 一覧が取れないと業種・日本語銘柄名・JPXからのユニバース補充が同時に劣化する。
         # 標準出力に紛れて見落とされないよう、GitHub Actionsの警告注釈として出す。
         print("::warning::JPX上場銘柄一覧を取得できませんでした。業種・銘柄名の更新をスキップします。")
+    # 今回の実行で最新となる市場日(土日祝・取引終了前は直前の取引日)。
+    market_date_expected = latest_trading_day(cutoff_date)
     repair_only = os.environ.get("REPAIR_MISSING_CLOSES_ONLY") == "1"
+    if repair_only and not has_signals_for_date(sb, market_date_expected):
+        # 修復モードは「通常更新は済んでいて、一部銘柄の終値だけ欠けた」前提。
+        # 通常更新そのものが未実行(本実行が取引終了前に発火した・失敗した等)の市場日を
+        # 修復モードで処理すると、優先銘柄しか更新されず当日の全銘柄シグナルが欠けるため、
+        # 通常モードへ切り替える。
+        print(
+            f"{market_date_expected.isoformat()}のシグナルが未保存のため、"
+            "修復モードではなく通常モードで実行します。"
+        )
+        repair_only = False
+    write_github_output("mode", "repair" if repair_only else "full")
     all_tickers = (
-        select_repair_tickers(sb, jp_names, cutoff_date)
+        # cutoff_dateが土日祝の場合、その日のpricesは存在しないため直前の取引日で判定する
+        # (以前はcutoff_dateで判定しており、休日の修復実行で優先銘柄を毎回再取得していた)。
+        select_repair_tickers(sb, jp_names, market_date_expected)
         if repair_only
         else select_daily_tickers(sb, jp_names)
     )
     run_kind = "repair" if repair_only else "daily"
     print(
         f"{run_kind} analysis target: {len(all_tickers)} / max {MAX_DAILY_TICKERS} "
-        f"(cutoff={cutoff_date.isoformat()}, now={now_jst.isoformat()})"
+        f"(cutoff={cutoff_date.isoformat()}, market_date={market_date_expected.isoformat()}, "
+        f"now={now_jst.isoformat()})"
     )
     if not all_tickers:
         print("更新対象の欠損・未更新銘柄はありません。")
@@ -823,6 +916,8 @@ def main():
 
     # 銘柄マスタをupsert(当日ユニバース外の業種欠損もJPX一覧から埋め直す)
     upsert_stock_master(sb, all_tickers, jp_sectors, backfill=not repair_only)
+
+    from train_model import repair_price_glitches
 
     histories = {}
     all_price_rows = []
@@ -860,6 +955,9 @@ def main():
         if hist.empty:
             print(f"skip {ticker}: no rows with valid close")
             continue
+        # 学習(build_dataset)と同じく、yfinanceの桁ずれ価格を補修してから指標を計算する。
+        # 以前は学習側だけ補修しており、桁ずれ日が推論・prices保存にそのまま入っていた。
+        hist = repair_price_glitches(hist)
 
         hist["sma25"] = hist["Close"].rolling(25).mean()
         hist["sma75"] = hist["Close"].rolling(75).mean()
@@ -1000,12 +1098,23 @@ def main():
     max_ml_candidates = int(
         (model_bundle or {}).get("training_config", {}).get("max_daily_ml_buy_candidates", 0) or 0
     )
-    if max_ml_candidates > 0:
-        removed = limit_ml_buy_candidates(all_signal_rows, max_ml_candidates)
+    if max_ml_candidates > 0 and all_signal_rows:
+        # 同じ市場日を再処理する場合(修復実行・手動再実行)、今回処理しなかった銘柄に
+        # 付いている既存のAI買い候補も上限に数える。以前は実行ごとに上位N件を選んでおり、
+        # 週末・祝日のスケジュール実行が直前営業日を毎回通常モードで再処理していたため、
+        # 当日の合計が上限20件を超えていた(2026-09-18は22件、9/24は21件)。
+        latest_market_date = max(row["date"] for row in all_signal_rows)
+        existing = count_other_ml_buy_candidates(
+            sb,
+            datetime.fromisoformat(latest_market_date).date(),
+            {row["ticker"] for row in all_signal_rows},
+        )
+        allowed = max(0, max_ml_candidates - existing)
+        removed = limit_ml_buy_candidates(all_signal_rows, allowed)
         if removed:
             print(
-                f"ML買い候補を超過リターンスコア上位{max_ml_candidates}件へ絞り込み "
-                f"({removed}件を除外)"
+                f"ML買い候補を超過リターンスコア上位{allowed}件へ絞り込み "
+                f"(上限{max_ml_candidates}件・同日の既存{existing}件、{removed}件を除外)"
             )
 
     upsert_signals_with_schema_fallback(sb, all_signal_rows)
