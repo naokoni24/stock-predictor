@@ -1,5 +1,9 @@
 # CLAUDE.md — stock-predictor 作業ルール
 
+## 回答の言語(最優先)
+
+ユーザーへの回答は**必ず日本語**で書く(ユーザーは英語が読めない)。最終回答・途中報告・質問・ツールの説明文もすべて日本語。英語でよいのはコード・コマンド・コミットメッセージだけ。
+
 ## 作業前後の必須手順
 
 1. **作業前**: `/Users/nao/Documents/Obsidian Vault/stock-predictor/stock-predictor.md` を読む。
