@@ -4,7 +4,7 @@ import { NextRequest, NextResponse } from "next/server";
  * GitHub Actions(daily-signals.yml)の日次スケジュール実行が大幅に遅延・未発火の
  * ときだけ、修復モード(REPAIR_MISSING_CLOSES_ONLY)でworkflow_dispatchを起動する。
  *
- * 11:37 JSTの本実行・13:37 JSTの修復実行(2026-09-07に前倒し。実測では4〜6時間遅れて
+ * 11:07 JSTの本実行・13:07 JSTの修復実行(2026-09-07に前倒し、2026-09-26にさらに30分前倒し。実測では4〜6時間遅れて
  * 16〜19時台に発火している)はどちらもGitHub Actionsの`schedule`イベントに依存しており、GitHub側のスケジュール配送遅延には対処できない
  * (GitHub公式もscheduled workflowが高負荷時に遅延・欠落しうると案内しており、
  * 特に毎時ちょうど等キリの良い時刻は混雑しやすいと明記している。2026-09-04に
@@ -26,7 +26,7 @@ import { NextRequest, NextResponse } from "next/server";
  * - 本日(JST)の取引終了(15:00 JST)以降に開始したdaily-signals実行だけを数える。
  *   取引終了前に開始した実行は当日分を除外して前営業日までしか処理しないため
  *   (scripts/fetch_and_signal.pyのMARKET_CLOSE_HOUR_JST)、それを「成功済み」と
- *   みなすと当日終値が翌日まで反映されない。スケジュール遅延が縮まり11:37/13:37に
+ *   みなすと当日終値が翌日まで反映されない。スケジュール遅延が縮まり11:07/13:07に
  *   定刻発火した日にこの状態になるため、以前の「本日0時以降」基準から変更した。
  * - 上記の実行が既にqueued/in_progressなら何もしない。
  * - 上記の実行が既にsuccessで完了していれば何もしない。
