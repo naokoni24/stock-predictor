@@ -2,7 +2,7 @@ name: Monthly model retrain
 
 on:
   schedule:
-    # 毎月1日 7:00 JST (UTC 22:00)
+    # 毎月2日 7:00 JST (UTC 1日22:00)。UTCの1日22:00は日本時間では翌2日の7:00になる
     - cron: "0 22 1 * *"
   workflow_dispatch: {}
 

@@ -3,7 +3,11 @@ jpholiday
 pandas
 supabase
 openpyxl
-scikit-learn
-lightgbm
+# model.pklはjoblib(pickle)で保存するため、学習時と推論時でscikit-learn/lightgbmの
+# メジャー・マイナー版が大きく違うと読み込めなくなる。月次再学習と日次推論が同じ範囲を
+# 使うよう上限を固定する(2026-09-26時点の本番: scikit-learn 1.9.1 / lightgbm 4.7.0)。
+# 更新する場合は、再学習でmodel.pklを作り直すことが前提。
+scikit-learn>=1.9,<1.10
+lightgbm>=4.7,<4.8
 joblib
 optuna

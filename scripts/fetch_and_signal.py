@@ -119,6 +119,12 @@ def load_ml_model():
     except FileNotFoundError:
         print("model.pkl not found, skip ML prediction")
         return None
+    except Exception as exc:
+        # scikit-learn/lightgbmの非互換更新などでmodel.pklを読めなくなっても、
+        # 株価・テクニカル指標の更新まで止めないようML推論だけをスキップする。
+        # 以前はFileNotFoundError以外で日次バッチ全体が落ちる作りだった。
+        print(f"::warning::model.pklを読み込めないためAI推論をスキップします: {exc}")
+        return None
 
 
 def load_model_generations() -> list:
