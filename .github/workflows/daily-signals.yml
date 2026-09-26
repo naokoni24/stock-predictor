@@ -2,7 +2,7 @@ name: Daily stock signal update
 
 on:
   schedule:
-    # 毎日11:07 JST (UTC 02:07) に実行(2026-09-07に11:37へ、2026-09-26にユーザー依頼でさらに30分前倒し)。
+    # 毎日10:37 JST (UTC 01:37) に実行(2026-09-07に11:37へ、2026-09-26にユーザー依頼で11:07→10:37へ計1時間前倒し)。
     # 東証の取引終了(15:00 JST)より前なので、scripts/fetch_and_signal.py側の
     # 安全策(MARKET_CLOSE_HOUR_JST、取引終了前は当日分を除外)が働く前提の設定。
     # 経緯: 2026-08-18時点では「取引終了時刻を基準に、遅延はコード側の安全策で吸収する」
@@ -12,12 +12,12 @@ on:
     # 遅延を見込んで大きく前倒しても、上記の安全策により「取引中の暫定値を当日終値として
     # 保存する」事故は起きないため、6時間の遅延を見込んで11:37 JSTへ前倒し
     # (それでも遅延が縮小すれば15:00 JST過ぎに正常発火する可能性もある)。
-    - cron: "7 2 * * *"
-    # 通常更新で終値が欠損・未更新だった銘柄だけを13:07 JST (UTC 04:07) に再取得する
-    # (2026-09-07、17:12→13:37に前倒し。2026-09-26にさらに30分前倒し。理由は本実行と同じ)。
+    - cron: "37 1 * * *"
+    # 通常更新で終値が欠損・未更新だった銘柄だけを12:37 JST (UTC 03:37) に再取得する
+    # (2026-09-07、17:12→13:37に前倒し。2026-09-26にさらに1時間前倒し。理由は本実行と同じ)。
     # 同じ全銘柄処理を繰り返さず無料枠消費を抑える。本実行が取引終了前に発火して
     # 当日分を処理できていない場合は、スクリプト側で通常モードへ切り替わる。
-    - cron: "7 4 * * *"
+    - cron: "37 3 * * *"
   workflow_dispatch:
     inputs:
       repair_only:
@@ -71,21 +71,21 @@ jobs:
       # 実績評価・ニュース取得・保持期間処理は、本実行スケジュール(土日もニュース取得を
       # 続けるため)か、通常モードで全銘柄を処理した実行でだけ行う。
       - name: Evaluate live AI signal outcomes
-        if: github.event.schedule == '7 2 * * *' || steps.signal.outputs.mode == 'full'
+        if: github.event.schedule == '37 1 * * *' || steps.signal.outputs.mode == 'full'
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: python scripts/evaluate_signal_outcomes.py
 
       - name: Fetch market news
-        if: github.event.schedule == '7 2 * * *' || steps.signal.outputs.mode == 'full'
+        if: github.event.schedule == '37 1 * * *' || steps.signal.outputs.mode == 'full'
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: python scripts/fetch_news.py
 
       - name: Apply retention policy
-        if: github.event.schedule == '7 2 * * *' || steps.signal.outputs.mode == 'full'
+        if: github.event.schedule == '37 1 * * *' || steps.signal.outputs.mode == 'full'
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
