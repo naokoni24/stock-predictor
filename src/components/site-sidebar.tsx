@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, Wallet, ListFilter, LineChart } from "lucide-react";
+import { LayoutDashboard, Wallet, ListFilter, Activity, Bookmark, BarChart3, LineChart } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 
@@ -10,6 +10,9 @@ const NAV_ITEMS = [
   { href: "/", label: "本日のおすすめ", icon: LayoutDashboard },
   { href: "/holdings", label: "ポートフォリオ", icon: Wallet },
   { href: "/stocks", label: "登録銘柄一覧", icon: ListFilter },
+  { href: "/changes", label: "シグナル変化", icon: Activity },
+  { href: "/watchlist", label: "ウォッチリスト", icon: Bookmark },
+  { href: "/performance", label: "AI成績", icon: BarChart3 },
 ];
 
 export function SiteSidebar() {

@@ -1,3 +1,5 @@
+import { addWatch } from "@/app/watchlist/actions";
+import { SubmitButton } from "@/components/login-submit-button";
 import Link from "next/link";
 import { ArrowLeft, Brain, ExternalLink, TrendingDown, TrendingUp } from "lucide-react";
 import { supabase } from "@/lib/supabase";
@@ -199,6 +201,12 @@ export default async function StockDetail({
           )}
         </div>
       </div>
+
+      {stock && <form action={addWatch} className="self-start">
+        <input type="hidden" name="ticker" value={ticker} />
+        <input type="hidden" name="signalAlert" value="on" />
+        <SubmitButton label="ウォッチリストに追加" pendingLabel="追加中..." />
+      </form>}
 
       {error && <p className="text-bearish text-sm">データ取得エラー: {error.message}</p>}
 

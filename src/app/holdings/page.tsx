@@ -1,4 +1,6 @@
 import Link from "next/link";
+import { fetchMarketSignals } from "@/lib/activity-data";
+import { holdingReview } from "@/lib/signal-activity";
 import { AlertTriangle, ArrowDownRight, ArrowUpRight, Wallet } from "lucide-react";
 import { createClient } from "@/lib/supabase-server";
 import HoldingsForm from "./HoldingsForm";
@@ -38,10 +40,10 @@ export default async function HoldingsPage({
   const { error: formError, success } = await searchParams;
   const supabase = await createClient();
 
-  const { data: holdings, error } = await supabase
-    .from("holdings")
-    .select("id, ticker, shares, cost_price, stocks(name)")
-    .order("id");
+  const [{ data: holdings, error }, market] = await Promise.all([
+    supabase.from("holdings").select("id, ticker, shares, cost_price, stocks(name)").order("id"),
+    fetchMarketSignals(),
+  ]);
 
   const tickers = [...new Set((holdings ?? []).map((h) => h.ticker))];
   // 全銘柄共通の件数上限だと、更新が止まった銘柄の行が他銘柄の履歴に押し出される。
@@ -112,6 +114,10 @@ export default async function HoldingsPage({
       stopLossHit,
       signal: latest?.signal ?? null,
       risk: riskLevel(latest?.rsi14 ?? null, profitRate),
+      review: holdingReview({ close: currentPrice, costPrice: h.cost_price, priceDate: latest?.date ?? null,
+        latestDate: market.error ? null : market.latestDate,
+        current: market.current.find((r) => r.ticker === h.ticker) ?? null,
+        previous: market.previous.find((r) => r.ticker === h.ticker) ?? null }),
     };
   });
 
@@ -163,6 +169,18 @@ export default async function HoldingsPage({
           ))}
         </div>
       )}
+
+      {rows.length > 0 && <Card>
+        <CardHeader><CardTitle className="text-base">保有株の確認優先度</CardTitle></CardHeader>
+        <CardContent className="space-y-3">
+          <p className="text-xs text-muted-foreground">損切り目安への到達、売り候補、更新待ち、損切り目安への接近、同一モデルでのAIスコア低下の順で確認します。売買を自動実行するものではありません。</p>
+          {market.error && <p className="text-xs text-bearish">最新シグナルを取得できないため、更新確認として表示しています。</p>}
+          {[...rows].sort((a, b) => b.review.priority - a.review.priority || a.id - b.id).map((h) => <Link key={h.id} href={`/stock/${h.ticker}`} className="block rounded-lg border p-3 hover:bg-accent/50">
+            <div className="flex flex-wrap items-center gap-2"><span className="font-medium text-sm">{h.stockName ?? h.ticker}</span><Badge variant="secondary">{h.review.label}</Badge><span className="text-xs text-muted-foreground">{h.shares}株・取得単価 ¥{h.cost_price.toLocaleString()}</span></div>
+            {h.review.reasons.map((reason) => <p key={reason} className="text-xs text-muted-foreground mt-1">{reason}</p>)}
+          </Link>)}
+        </CardContent>
+      </Card>}
 
       {rows.length > 0 && (
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">

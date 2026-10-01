@@ -95,27 +95,24 @@ test("認証更新・削除Cookieをリダイレクト時も維持する", async
 });
 
 test("本番成績が1000行を超えても90日分をページングして集計する", async () => {
-  const all = Array.from({ length: 1505 }, () => ({ outcome_date: "9999-01-01", net_return: 0.01, model_version: "test", evaluation_version: "next_open_stop_excess_v1" }));
+  const all = Array.from({ length: 1505 }, () => ({ outcome_date: new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Tokyo" }), net_return: 0.01, model_version: "test", evaluation_version: "next_open_stop_excess_v1" }));
   const ranges = [];
   const query = () => {
     let range;
     const builder = {
-      select: () => builder, eq: () => builder, gte: () => builder, order: () => builder,
+      select: () => builder, eq: () => builder, gte: () => builder, lte: () => builder, order: () => builder,
       range: (from, to) => { range = [from, to]; ranges.push(range); return builder; },
       then: (resolve) => resolve({ data: all.slice(range[0], range[1] + 1), error: null }),
     };
     return builder;
   };
-  // ページ本体から非公開の取得関数をテスト用にexportする。ネットワークへは接続しない。
-  const source = readFileSync(resolve(__dirname, "../src/app/page.tsx"), "utf8") + "\nexport { fetchLivePerformance };";
-  const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText;
-  const loaded = { exports: {} };
-  new Function("require", "exports", "module", compiled)((name) => {
-    if (name === "@/lib/supabase") return { supabase: { from: query } };
-    if (name.startsWith("@/")) return {};
-    return runtimeRequire(name);
-  }, loaded.exports, loaded);
-  const result = await loaded.exports.fetchLivePerformance();
+  const summary = loadSource("src/lib/performance-summary.ts", {});
+  const loaded = loadSource("src/lib/performance-data.ts", {
+    react: { cache: (fn) => fn },
+    "@/lib/supabase": { supabase: { from: query } },
+    "@/lib/performance-summary": summary,
+  });
+  const result = await loaded.fetchLivePerformance();
   assert.equal(result.longer.trades, 1505);
   assert.deepEqual(ranges, [[0, 999], [1000, 1999]]);
 });
@@ -143,6 +140,8 @@ test("保有株は銘柄ごとの最新2価格を使い、古いsignals価格に
   const component = ({ children }) => createElement("div", {}, children);
   const page = loadSource("src/app/holdings/page.tsx", new Proxy({
     "@/lib/supabase-server": { createClient: async () => ({ from }) },
+    "@/lib/activity-data": { fetchMarketSignals: async () => ({ latestDate: "2026-10-01", current: [], previous: [], error: null }) },
+    "@/lib/signal-activity": loadSource("src/lib/signal-activity.ts", {}),
     "@/lib/utils": { cn: () => "", getCloseLabel: (date) => date },
     "next/link": { default: component },
   }, {
@@ -155,4 +154,45 @@ test("保有株は銘柄ごとの最新2価格を使い、古いsignals価格に
   assert.equal(calls.find((c) => c.table === "prices").limit, 2);
   assert.equal(calls.find((c) => c.table === "signals").limit, 1);
   assert.equal(calls.find((c) => c.table === "prices").ticker, "7203.T");
+});
+
+test("実績の途中ページ取得失敗を部分的な成績として表示しない", async () => {
+  let requests = 0;
+  const builder = { select: () => builder, eq: () => builder, gte: () => builder, lte: () => builder,
+    order: () => builder, range: () => builder,
+    then: (resolve) => resolve(++requests === 1
+      ? { data: Array(1000).fill({ net_return: 1 }), error: null }
+      : { data: null, error: { message: "取得失敗" } }),
+  };
+  const loaded = loadSource("src/lib/performance-data.ts", {
+    react: { cache: (fn) => fn }, "@/lib/supabase": { supabase: { from: () => builder } },
+    "@/lib/performance-summary": loadSource("src/lib/performance-summary.ts", {}),
+  });
+  const result = await loaded.fetchLivePerformance();
+  assert.equal(result.longer, null);
+  assert.ok(result.error);
+});
+
+test("ウォッチリスト更新は認証済みの本人に限定し、未認証ではDBを呼ばない", async () => {
+  for (const user of [null, { id: "本人" }]) {
+    const calls = [];
+    const builder = { update: (values) => { calls.push(values); return builder; },
+      eq: (key, value) => { calls.push([key, value]); return builder; },
+      select: async () => ({ data: [{ ticker: "7203.T" }], error: null }),
+    };
+    const actions = loadSource("src/app/watchlist/actions.ts", {
+      "next/navigation": { redirect: (url) => { throw new Error(url); } },
+      "next/cache": { revalidatePath: () => {} },
+      "@/lib/supabase-server": { createClient: async () => ({ auth: { getUser: async () => ({ data: { user }, error: null }) },
+        from: () => builder }) },
+      "@/lib/signal-activity": loadSource("src/lib/signal-activity.ts", {}),
+    });
+    const form = new FormData();
+    form.set("ticker", "7203.T"); form.set("priceAbove", "200");
+    await assert.rejects(actions.updateWatch(form), (error) => error.message.startsWith(user ? "/watchlist?success=" : "/login"));
+    if (user) {
+      assert.ok(calls.some((call) => Array.isArray(call) && call[0] === "user_id" && call[1] === "本人"));
+      assert.ok(calls.some((call) => Array.isArray(call) && call[0] === "ticker" && call[1] === "7203.T"));
+    } else assert.deepEqual(calls, []);
+  }
 });

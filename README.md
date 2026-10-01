@@ -8,6 +8,9 @@
 - `/`: 本日のおすすめ(買い候補/売り候補タブ)、AI注目銘柄、マーケットニュース。
 - `/holdings`: 保有株のCRUD、損益・リスク表示、推奨損切り価格、資産配分グラフ。認証必須。
 - `/stocks`: 登録銘柄一覧、検索。
+- `/changes`: 直近2市場日のテクニカル/AIシグナル変化。保有株を先に表示。
+- `/watchlist`: 個人ウォッチリスト、上限/下限価格とシグナル変化のアプリ内アラート。
+- `/performance`: AI本番成績の30日/90日、スコア帯・業種・モデル世代別分析。
 - `/stock/[ticker]`: 銘柄詳細(ローソク足チャート、テクニカル指標、AI分析、AIスコア履歴、ファンダメンタル指標)。
 - `/login`、`/forgot-password`、`/reset-password`: Supabase Authによる認証。
 
@@ -105,6 +108,10 @@ GitHub Actionsの`schedule`イベント自体が高負荷等で大幅遅延・�
 ## Supabaseスキーマ変更
 
 スキーマ変更は自動実行せず、`supabase/` 配下にSQLを追加してSQL Editorで手動実行する運用にしている。
+
+個人ウォッチリストを有効にするには、[add_personal_watchlists.sql](supabase/add_personal_watchlists.sql)を実行する。
+未適用でも既存画面・日次バッチは動作する。ウォッチリスト画面は設定案内を表示する。
+追加機能の使い方・更新上限・検証手順は [追加機能の説明](docs/features-2026-10-01.md) を参照。
 
 ## 検証コマンド
 

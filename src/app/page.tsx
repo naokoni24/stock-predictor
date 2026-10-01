@@ -1,4 +1,6 @@
 import Link from "next/link";
+import { SignalChanges } from "@/components/signal-changes";
+import { fetchLivePerformance } from "@/lib/performance-data";
 import { ArrowDownRight, ArrowUpRight, Newspaper, Sparkles } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -34,13 +36,6 @@ type Row = {
   stockName?: string;
   sector?: string;
   changePct?: number | null;
-};
-
-type OutcomeRow = {
-  outcome_date: string;
-  net_return: number;
-  model_version: string;
-  evaluation_version: string | null;
 };
 
 function isMissingMlExplanationColumn(error: { message?: string | null; code?: string | null } | null) {
@@ -149,56 +144,6 @@ async function fetchWatchlists() {
   return {
     buy: { rows: buyRows, error },
     sell: { rows: sellRows, error },
-  };
-}
-
-function isMissingOutcomeTable(error: { message?: string | null; code?: string | null } | null) {
-  const message = error?.message ?? "";
-  return error?.code === "PGRST205" || message.includes("signal_outcomes") || message.includes("evaluation_version");
-}
-
-function summarizeOutcomes(rows: OutcomeRow[], days: number) {
-  const since = new Date();
-  since.setDate(since.getDate() - days);
-  const sinceDate = since.toISOString().slice(0, 10);
-  const selected = rows.filter((row) => row.outcome_date >= sinceDate);
-  if (selected.length === 0) return null;
-  const netReturn = selected.reduce((sum, row) => sum + row.net_return, 0) / selected.length;
-  return {
-    trades: selected.length,
-    winRate: selected.filter((row) => row.net_return > 0).length / selected.length,
-    netReturn,
-  };
-}
-
-async function fetchLivePerformance() {
-  const since = new Date();
-  since.setDate(since.getDate() - 90);
-  const rows: OutcomeRow[] = [];
-  const pageSize = 1000;
-  // 90日分が500件を超えても、途中で打ち切った成績を表示しない。
-  // ページ間の順序を固定し、旧定義の行はDB側で除外する。
-  for (let offset = 0; ; offset += pageSize) {
-    const { data, error } = await supabase
-      .from("signal_outcomes")
-      .select("outcome_date, net_return, model_version, evaluation_version")
-      .eq("evaluation_version", "next_open_stop_excess_v1")
-      .gte("outcome_date", since.toISOString().slice(0, 10))
-      .order("outcome_date", { ascending: false })
-      .order("signal_date", { ascending: false })
-      .order("ticker")
-      .range(offset, offset + pageSize - 1);
-    if (error) {
-      return { recent: null, longer: null, latestModel: null, error: isMissingOutcomeTable(error) ? null : error };
-    }
-    rows.push(...((data ?? []) as OutcomeRow[]));
-    if (!data || data.length < pageSize) break;
-  }
-  return {
-    recent: summarizeOutcomes(rows, 30),
-    longer: summarizeOutcomes(rows, 90),
-    latestModel: rows[0]?.model_version ?? null,
-    error: null,
   };
 }
 
@@ -393,6 +338,8 @@ export default async function Home() {
         )}
       </div>
 
+      <SignalChanges compact />
+
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2 flex flex-col gap-4">
           <Tabs defaultValue="buy" className="flex-col gap-3">
@@ -508,6 +455,7 @@ export default async function Home() {
               </CardTitle>
             </CardHeader>
             <CardContent>
+              <Link href="/performance" className="inline-block text-sm text-primary underline mb-3">条件別の成績を見る</Link>
               {performance.error && (
                 <p className="text-bearish text-sm">データ取得エラー: {performance.error.message}</p>
               )}

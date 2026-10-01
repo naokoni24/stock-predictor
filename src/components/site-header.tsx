@@ -2,23 +2,38 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, Wallet, ListFilter, LineChart, LogOut } from "lucide-react";
+import {
+  LayoutDashboard,
+  Wallet,
+  ListFilter,
+  Activity,
+  Bookmark,
+  BarChart3,
+  LineChart,
+  Menu,
+  LogOut,
+} from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+} from "@/components/ui/dropdown-menu";
 
 const NAV_ITEMS = [
   { href: "/", label: "おすすめ", icon: LayoutDashboard },
   { href: "/holdings", label: "ポートフォリオ", icon: Wallet },
   { href: "/stocks", label: "銘柄一覧", icon: ListFilter },
+  { href: "/changes", label: "シグナル変化", icon: Activity },
+  { href: "/watchlist", label: "ウォッチリスト", icon: Bookmark },
+  { href: "/performance", label: "AI成績", icon: BarChart3 },
 ];
 
-export function SiteHeader({
-  onLogout,
-}: {
-  onLogout: () => Promise<void>;
-}) {
+export function SiteHeader({ onLogout }: { onLogout: () => Promise<void> }) {
   const pathname = usePathname();
 
   return (
@@ -30,27 +45,49 @@ export function SiteHeader({
           </div>
         </Link>
 
-        <nav className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto md:hidden">
-          {NAV_ITEMS.map((item) => {
-            const active =
-              item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
-            const Icon = item.icon;
-            return (
-              <Link
-                key={item.href}
-                href={item.href}
-                className={cn(
-                  "flex items-center gap-1 rounded-md px-1.5 py-1.5 text-[11px] font-medium whitespace-nowrap transition-colors",
-                  active
-                    ? "bg-secondary text-foreground"
-                    : "text-muted-foreground hover:bg-secondary/60"
-                )}
+        <nav className="min-w-0 flex-1 md:hidden" aria-label="画面メニュー">
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="ghost"
+                className="max-w-full gap-2 px-2"
+                aria-label="画面メニューを開く"
               >
-                <Icon className="size-3.5 shrink-0" />
-                {item.label}
-              </Link>
-            );
-          })}
+                <Menu className="size-4 shrink-0" />
+                <span className="truncate">
+                  {NAV_ITEMS.find((item) =>
+                    item.href === "/"
+                      ? pathname === "/"
+                      : pathname.startsWith(item.href),
+                  )?.label ?? "メニュー"}
+                </span>
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" className="min-w-52">
+              {NAV_ITEMS.map((item) => {
+                const active =
+                  item.href === "/"
+                    ? pathname === "/"
+                    : pathname.startsWith(item.href);
+                const Icon = item.icon;
+                return (
+                  <DropdownMenuItem key={item.href} asChild>
+                    <Link
+                      href={item.href}
+                      aria-current={active ? "page" : undefined}
+                      className={cn(
+                        "gap-2",
+                        active && "bg-secondary font-semibold",
+                      )}
+                    >
+                      <Icon className="size-4" />
+                      {item.label}
+                    </Link>
+                  </DropdownMenuItem>
+                );
+              })}
+            </DropdownMenuContent>
+          </DropdownMenu>
         </nav>
 
         <div className="ml-auto flex items-center gap-1 shrink-0">
@@ -61,7 +98,13 @@ export function SiteHeader({
               if (!confirm("ログアウトしますか？")) e.preventDefault();
             }}
           >
-            <Button variant="ghost" size="icon" className="size-8" type="submit" aria-label="ログアウト">
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-8"
+              type="submit"
+              aria-label="ログアウト"
+            >
               <LogOut className="size-4" />
             </Button>
           </form>

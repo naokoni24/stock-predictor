@@ -8,7 +8,7 @@ import pandas as pd
 
 from market_calendar import get_market_cutoff, is_jpx_trading_day, next_trading_dates
 from evaluate_signal_outcomes import simulate_trade, topix_return
-from fetch_and_signal import limit_ml_buy_candidates, make_signal, repair_inference_universe, upsert_in_chunks
+from fetch_and_signal import limit_ml_buy_candidates, make_signal, repair_inference_universe, upsert_in_chunks, get_watchlist_tickers, select_daily_tickers
 from train_model import add_breadth_features, compute_barrier_outcome
 
 
@@ -75,6 +75,31 @@ class OutcomeTests(unittest.TestCase):
 
 
 class SignalTests(unittest.TestCase):
+    def test_watchlists_deduplicate_and_limit(self):
+        sb = MagicMock()
+        sb.table.return_value.select.return_value.order.return_value.order.return_value.limit.return_value.execute.return_value.data = [
+            {"ticker": "7203.T", "stocks": [{"name": "トヨタ"}]},
+            {"ticker": "7203.T", "stocks": {"name": "重複"}},
+        ] + [{"ticker": f"{i}.T", "stocks": None} for i in range(1000, 1040)]
+        result = get_watchlist_tickers(sb)
+        self.assertEqual(len(result), 30)
+        self.assertEqual(result["7203.T"], "トヨタ")
+
+    def test_watchlists_missing_sql_does_not_stop_daily_batch(self):
+        sb = MagicMock()
+        sb.table.side_effect = RuntimeError("PGRST205: watchlists missing")
+        self.assertEqual(get_watchlist_tickers(sb), {})
+
+    def test_watchlists_priority_and_daily_capacity(self):
+        with patch("fetch_and_signal.TICKERS", {"7203.T": "固定"}), \
+             patch("fetch_and_signal.get_holdings_tickers", return_value={"6758.T": "保有"}), \
+             patch("fetch_and_signal.get_watchlist_tickers", return_value={"9984.T": "監視"}), \
+             patch("fetch_and_signal.get_previous_signal_tickers", return_value={"9984.T": "重複"}), \
+             patch("fetch_and_signal.get_screener_tickers", return_value={f"{i}.T": str(i) for i in range(1000, 1200)}):
+            result = select_daily_tickers(MagicMock(), {})
+        self.assertEqual(len(result), 150)
+        self.assertEqual(list(result)[:3], ["7203.T", "6758.T", "9984.T"])
+
     def test_price_scale_invariance_and_score_sign(self):
         row = {"Close": 100, "sma25": 102, "sma75": 100, "rsi14": 45, "macd": 2, "macd_signal": 1, "bb_upper": 110, "bb_lower": 90}
         signal, score = make_signal(row)

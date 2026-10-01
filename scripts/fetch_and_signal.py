@@ -51,6 +51,7 @@ MAX_DAILY_TICKERS = 150
 INFERENCE_HISTORY_PERIOD = "2y"
 SCREENER_SIZE = 50
 PREVIOUS_SIGNAL_LIMIT = 50
+MAX_WATCHLIST_TICKERS = 30
 
 # prices/signalsのupsertをまとめて送る際の1リクエストあたりの最大行数
 UPSERT_CHUNK_SIZE = 500
@@ -559,6 +560,30 @@ def get_holdings_tickers(sb) -> dict[str, str]:
         return {}
 
 
+def get_watchlist_tickers(sb) -> dict[str, str]:
+    """個人ウォッチリストを追加順に最大30銘柄まで日次分析へ含める。"""
+    try:
+        # 全ユーザーで重複除去する。読み取り自体も上限を設け、無料枠を維持する。
+        rows = (sb.table("watchlists").select("ticker, stocks(name)")
+                .order("created_at").order("ticker").limit(1000).execute()).data or []
+        result = {}
+        for row in rows:
+            ticker = row.get("ticker")
+            if not ticker or ticker in result:
+                continue
+            stock = row.get("stocks")
+            if isinstance(stock, list):
+                stock = stock[0] if stock else None
+            result[ticker] = (stock or {}).get("name") or ticker
+            if len(result) >= MAX_WATCHLIST_TICKERS:
+                break
+        return result
+    except Exception as exc:
+        # SQL適用前も既存の日次バッチを継続する。
+        print(f"ウォッチリストの取得をスキップ: {exc}")
+        return {}
+
+
 def get_previous_signal_tickers(sb, limit: int = PREVIOUS_SIGNAL_LIMIT) -> dict[str, str]:
     """前回強かった/弱かった銘柄は継続監視する"""
     try:
@@ -604,6 +629,7 @@ def select_daily_tickers(sb, jp_names: dict[str, str]) -> dict[str, str]:
 
     add_candidates(selected, TICKERS, jp_names, "fixed tickers")
     add_candidates(selected, get_holdings_tickers(sb), jp_names, "holdings")
+    add_candidates(selected, get_watchlist_tickers(sb), jp_names, "watchlists")
 
     previous_signal_tickers = get_previous_signal_tickers(sb)
     add_candidates(selected, previous_signal_tickers, jp_names, "previous signals")

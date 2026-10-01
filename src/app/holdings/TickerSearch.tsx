@@ -16,7 +16,7 @@ function normalizeManualTicker(raw: string): string {
   return /\.[A-Z]+$/.test(trimmed) ? trimmed : `${trimmed}.T`;
 }
 
-export default function TickerSearch() {
+export default function TickerSearch({ allowManual = true }: { allowManual?: boolean }) {
   const [query, setQuery] = useState("");
   const [searchResult, setSearchResult] = useState<{ query: string; options: StockOption[] }>({ query: "", options: [] });
   const [selected, setSelected] = useState<StockOption | null>(null);
@@ -180,7 +180,7 @@ export default function TickerSearch() {
         </div>
       )}
 
-      <button
+      {allowManual && <button
         type="button"
         className="self-start text-xs text-muted-foreground underline hover:text-foreground"
         onClick={() => {
@@ -192,7 +192,7 @@ export default function TickerSearch() {
         }}
       >
         見つからない場合は証券コードで直接追加
-      </button>
+      </button>}
 
       <input type="hidden" name="ticker" value={effectiveTicker} />
       <input type="hidden" name="name" value={effectiveName} />
