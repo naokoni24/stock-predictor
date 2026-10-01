@@ -23,9 +23,9 @@ import { NextRequest, NextResponse } from "next/server";
  * 2026-09-08週以降の実行実績(gh run list)を見て、必要ならさらに調整する。
  *
  * 判定ロジック(2026-09-03、2026-09-26修正):
- * - 本日(JST)の取引終了(15:00 JST)以降に開始したdaily-signals実行だけを数える。
+ * - 本日(JST)の取引終了(15:30 JST)以降に開始したdaily-signals実行だけを数える。
  *   取引終了前に開始した実行は当日分を除外して前営業日までしか処理しないため
- *   (scripts/fetch_and_signal.pyのMARKET_CLOSE_HOUR_JST)、それを「成功済み」と
+ *   (scripts/market_calendar.py)、それを「成功済み」と
  *   みなすと当日終値が翌日まで反映されない。スケジュール遅延が縮まり10:37/12:37に
  *   定刻発火した日にこの状態になるため、以前の「本日0時以降」基準から変更した。
  * - 上記の実行が既にqueued/in_progressなら何もしない。
@@ -53,8 +53,9 @@ type WorkflowRun = {
   html_url: string;
 };
 
-// 東証の取引終了時刻(JST)。scripts/fetch_and_signal.pyのMARKET_CLOSE_HOUR_JSTと同じ値。
+// 東証の取引終了時刻(JST)。scripts/market_calendar.pyと同じ値。
 const MARKET_CLOSE_HOUR_JST = 15;
+const MARKET_CLOSE_MINUTE_JST = 30;
 
 /** JST基準の「今日の取引終了時刻」をUTCのISO文字列で返す(JSTはUTC+9固定、サマータイムなし)。 */
 function todayMarketCloseJstAsUtcIso(): string {
@@ -63,7 +64,7 @@ function todayMarketCloseJstAsUtcIso(): string {
   const y = jstNow.getUTCFullYear();
   const m = jstNow.getUTCMonth();
   const d = jstNow.getUTCDate();
-  const closeJstUtcMs = Date.UTC(y, m, d, MARKET_CLOSE_HOUR_JST, 0, 0) - 9 * 60 * 60 * 1000;
+  const closeJstUtcMs = Date.UTC(y, m, d, MARKET_CLOSE_HOUR_JST, MARKET_CLOSE_MINUTE_JST, 0) - 9 * 60 * 60 * 1000;
   return new Date(closeJstUtcMs).toISOString();
 }
 
@@ -91,7 +92,7 @@ export async function GET(req: NextRequest) {
   }
 
   const runsRes = await fetch(
-    `https://api.github.com/repos/${OWNER}/${REPO}/actions/workflows/${WORKFLOW_FILE}/runs?per_page=10`,
+    `https://api.github.com/repos/${OWNER}/${REPO}/actions/workflows/${WORKFLOW_FILE}/runs?branch=${REF}&per_page=100`,
     { headers: githubHeaders(githubToken), cache: "no-store" }
   );
   if (!runsRes.ok) {

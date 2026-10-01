@@ -18,7 +18,7 @@ function normalizeManualTicker(raw: string): string {
 
 export default function TickerSearch() {
   const [query, setQuery] = useState("");
-  const [options, setOptions] = useState<StockOption[]>([]);
+  const [searchResult, setSearchResult] = useState<{ query: string; options: StockOption[] }>({ query: "", options: [] });
   const [selected, setSelected] = useState<StockOption | null>(null);
   const [open, setOpen] = useState(false);
   const [manualMode, setManualMode] = useState(false);
@@ -31,6 +31,8 @@ export default function TickerSearch() {
       return;
     }
 
+    let cancelled = false;
+    const controller = new AbortController();
     const timer = setTimeout(async () => {
       // 銘柄名だけでなく証券コードでも検索できるようにする
       // (「本田技研工業」のようにカタカナの通称では名前検索にヒットしない銘柄があるため)。
@@ -39,9 +41,11 @@ export default function TickerSearch() {
       // (かつエラーを読んでいなかったため無反応に見えていた)。name/tickerを別クエリに
       // 分けて実行しmerge・重複除去することでこの問題を避ける。
       const [byName, byTicker] = await Promise.all([
-        supabase.from("stocks").select("ticker, name").ilike("name", `%${query}%`).limit(8),
-        supabase.from("stocks").select("ticker, name").ilike("ticker", `%${query}%`).limit(8),
+        supabase.from("stocks").select("ticker, name").ilike("name", `%${query}%`).limit(8).abortSignal(controller.signal),
+        supabase.from("stocks").select("ticker, name").ilike("ticker", `%${query}%`).limit(8).abortSignal(controller.signal),
       ]);
+      // 古い検索の応答が遅れて届いても、現在の候補や選択済み銘柄を上書きしない。
+      if (cancelled) return;
 
       if (byName.error) console.error("stock search (name) failed:", byName.error.message);
       if (byTicker.error) console.error("stock search (ticker) failed:", byTicker.error.message);
@@ -50,10 +54,14 @@ export default function TickerSearch() {
       for (const row of [...(byName.data ?? []), ...(byTicker.data ?? [])]) {
         merged.set(row.ticker, row);
       }
-      setOptions(Array.from(merged.values()).slice(0, 8));
+      setSearchResult({ query, options: Array.from(merged.values()).slice(0, 8) });
     }, 250);
 
-    return () => clearTimeout(timer);
+    return () => {
+      cancelled = true;
+      controller.abort();
+      clearTimeout(timer);
+    };
   }, [query, selected]);
 
   useEffect(() => {
@@ -66,7 +74,8 @@ export default function TickerSearch() {
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
-  const visibleOptions = selected || query.trim().length < 1 ? [] : options;
+  const visibleOptions = selected || query.trim().length < 1 || searchResult.query !== query
+    ? [] : searchResult.options;
 
   // 候補をクリックせずEnterで送信すると、ticker未選択のまま
   // フォームが送信され「ティッカーを入力してください」の紛らわしいエラーになるため、
@@ -76,7 +85,7 @@ export default function TickerSearch() {
     e.preventDefault();
     if (!selected && visibleOptions.length > 0) {
       setSelected(visibleOptions[0]);
-      setOptions([]);
+      setSearchResult({ query: "", options: [] });
       setOpen(false);
     }
   };
@@ -160,7 +169,7 @@ export default function TickerSearch() {
               className="flex w-full flex-col items-start gap-0.5 px-3 py-2 text-sm text-left hover:bg-accent"
               onClick={() => {
                 setSelected(o);
-                setOptions([]);
+                setSearchResult({ query: "", options: [] });
                 setOpen(false);
               }}
             >
@@ -178,7 +187,7 @@ export default function TickerSearch() {
           setManualMode(true);
           setSelected(null);
           setQuery("");
-          setOptions([]);
+          setSearchResult({ query: "", options: [] });
           setOpen(false);
         }}
       >

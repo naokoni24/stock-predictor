@@ -7,6 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { cn, getCloseLabel } from "@/lib/utils";
+import { calculateHitRate } from "@/lib/stock-performance";
 
 const SIGNAL_LABEL: Record<string, string> = {
   buy_candidate: "買い候補",
@@ -62,7 +63,7 @@ export default async function StockDetail({
   historySince.setDate(historySince.getDate() - 420);
   const historySinceDate = historySince.toISOString().slice(0, 10);
 
-  const [{ data: stock }, { data: prices, error }, { data: signal }, { data: scoreHistory }, { data: signalHistory }] =
+  const [{ data: stock }, { data: prices, error }, { data: signal }, { data: scoreHistory }, { data: signalHistory }, { data: marketCalendar }] =
     await Promise.all([
       supabase.from("stocks").select("name, sector, per, pbr, target_price, forecast_eps").eq("ticker", ticker).maybeSingle(),
       supabase
@@ -84,28 +85,15 @@ export default async function StockDetail({
         .eq("ticker", ticker)
         .gte("date", historySinceDate)
         .order("date", { ascending: true }),
+      // 毎日取得する主力銘柄の価格日付を市場共通の取引日として使う。
+      // 個別銘柄の取得欠損・取引停止期間を営業日から除外しない。
+      supabase.from("prices").select("date").eq("ticker", "7203.T")
+        .gte("date", historySinceDate).order("date"),
     ]);
 
   // AI予測（買い候補）の的中率: シグナル発生から5営業日後に終値が上昇していたか
   const HIT_RATE_HORIZON = 5;
-  const hitRate = (() => {
-    if (!prices || !signalHistory) return null;
-    const dateIndex = new Map(prices.map((p, i) => [p.date, i]));
-    let wins = 0;
-    let total = 0;
-    for (const s of signalHistory) {
-      if (s.ml_signal !== "buy_candidate") continue;
-      const idx = dateIndex.get(s.date);
-      if (idx == null) continue;
-      const future = prices[idx + HIT_RATE_HORIZON];
-      // closeがnull(yfinanceの未確定/低調日)の場合、null(=0扱い)との比較で
-      // 的中率が不正に水増しされる不具合があったため、両方の終値が有効な場合のみ集計する。
-      if (!future || future.close == null || prices[idx].close == null) continue;
-      total += 1;
-      if (future.close > prices[idx].close) wins += 1;
-    }
-    return total > 0 ? { rate: (wins / total) * 100, total } : null;
-  })();
+  const hitRate = calculateHitRate(prices ?? [], signalHistory ?? [], (marketCalendar ?? []).map((p) => p.date), HIT_RATE_HORIZON);
 
   // yfinanceが当日終値をまだ確定配信していない日はcloseがnullで保存されるため、
   // ヘッダーの現在値・前日比には直近の有効な終値を使う(latest.close?.toLocaleString()
@@ -310,7 +298,7 @@ export default async function StockDetail({
               {hitRate && (
                 <div className="flex items-center justify-between text-sm">
                   <span className="text-muted-foreground">
-                    AI買い予測の的中率({HIT_RATE_HORIZON}日後上昇・{hitRate.total}件)
+                    AI買い予測の的中率({HIT_RATE_HORIZON}営業日後上昇・{hitRate.total}件)
                   </span>
                   <span
                     className={cn(

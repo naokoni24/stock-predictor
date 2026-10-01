@@ -172,21 +172,33 @@ function summarizeOutcomes(rows: OutcomeRow[], days: number) {
 }
 
 async function fetchLivePerformance() {
-  const { data, error } = await supabase
-    .from("signal_outcomes")
-    .select("outcome_date, net_return, model_version, evaluation_version")
-    .order("outcome_date", { ascending: false })
-    .limit(500);
-  if (isMissingOutcomeTable(error)) return { recent: null, longer: null, latestModel: null, error: null };
-  // 旧定義(終値ベースの絶対リターン)を新定義の超過リターンへ混ぜない。
-  const rows = ((data ?? []) as OutcomeRow[]).filter(
-    (row) => row.evaluation_version === "next_open_stop_excess_v1"
-  );
+  const since = new Date();
+  since.setDate(since.getDate() - 90);
+  const rows: OutcomeRow[] = [];
+  const pageSize = 1000;
+  // 90日分が500件を超えても、途中で打ち切った成績を表示しない。
+  // ページ間の順序を固定し、旧定義の行はDB側で除外する。
+  for (let offset = 0; ; offset += pageSize) {
+    const { data, error } = await supabase
+      .from("signal_outcomes")
+      .select("outcome_date, net_return, model_version, evaluation_version")
+      .eq("evaluation_version", "next_open_stop_excess_v1")
+      .gte("outcome_date", since.toISOString().slice(0, 10))
+      .order("outcome_date", { ascending: false })
+      .order("signal_date", { ascending: false })
+      .order("ticker")
+      .range(offset, offset + pageSize - 1);
+    if (error) {
+      return { recent: null, longer: null, latestModel: null, error: isMissingOutcomeTable(error) ? null : error };
+    }
+    rows.push(...((data ?? []) as OutcomeRow[]));
+    if (!data || data.length < pageSize) break;
+  }
   return {
     recent: summarizeOutcomes(rows, 30),
     longer: summarizeOutcomes(rows, 90),
     latestModel: rows[0]?.model_version ?? null,
-    error,
+    error: null,
   };
 }
 
@@ -513,7 +525,7 @@ export default async function Home() {
                   </p>
                   {performance.latestModel && (
                     <p className="text-[10px] text-muted-foreground break-all">
-                      モデル世代: {performance.latestModel}
+                      直近の確定実績のモデル世代: {performance.latestModel}
                     </p>
                   )}
                 </div>

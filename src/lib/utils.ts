@@ -6,8 +6,7 @@ export function cn(...inputs: ClassValue[]) {
 }
 
 /**
- * 終値の日付が日本時間の本日であれば「当日終値」、それ以外は「前日終値」を返す。
- * (株価データは平日16:30頃に更新されるため、当日分が反映されていれば「当日終値」となる)
+ * 当日以外は実際の日付を表示する。数日前の価格を「前日終値」と誤表示しない。
  */
 export function getCloseLabel(date: string): string {
   const today = new Date().toLocaleDateString("ja-JP", {
@@ -17,5 +16,5 @@ export function getCloseLabel(date: string): string {
     day: "2-digit",
   }).replace(/\//g, "-");
 
-  return date === today ? "当日終値" : "前日終値";
+  return date === today ? "当日終値" : `${date.slice(5).replace("-", "/")} 終値`;
 }

@@ -22,12 +22,12 @@ from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 
 import joblib
-import jpholiday
 import numpy as np
 import pandas as pd
 import yfinance as yf
 from yfinance.screener.query import EquityQuery
 from supabase import create_client
+from market_calendar import get_market_cutoff, is_jpx_trading_day
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "model.pkl")
 
@@ -58,7 +58,7 @@ UPSERT_CHUNK_SIZE = 500
 # 東証の取引終了時刻(JST)。この時刻より前にバッチが実行された場合、
 # yfinanceが返す当日分のデータは取引時間中の暫定値(未確定の終値)であり
 # 実際の当日終値とは一致しないため、当日分を除外して前営業日までのデータを使う。
-MARKET_CLOSE_HOUR_JST = 15
+# 実際の終了時刻はmarket_calendar.pyの15:30で共有する。
 
 # 通常更新で終値が欠損した場合に、夕方の再取得対象として優先する固定銘柄。
 # TICKERS全件を検証対象にすると、取引停止など一部銘柄の個別事情で日次バッチ全体を
@@ -618,23 +618,6 @@ def select_daily_tickers(sb, jp_names: dict[str, str]) -> dict[str, str]:
     return dict(selected)
 
 
-def get_market_cutoff(now_jst: datetime):
-    """今回保存してよい市場日と、取引終了後かどうかを返す。"""
-    after_market_close = now_jst.hour >= MARKET_CLOSE_HOUR_JST
-    cutoff_date = now_jst.date()
-    if not after_market_close:
-        cutoff_date -= timedelta(days=1)
-    return cutoff_date, after_market_close
-
-
-def is_jpx_trading_day(target_date) -> bool:
-    """JPXの通常休場日を除いて、終値が存在するはずの日かを判定する。"""
-    year_end_new_year = (target_date.month == 12 and target_date.day == 31) or (
-        target_date.month == 1 and target_date.day <= 3
-    )
-    return target_date.weekday() < 5 and not jpholiday.is_holiday(target_date) and not year_end_new_year
-
-
 def write_github_output(name: str, value: str):
     """GitHub Actionsの後続ステップへ値を渡す(ローカル実行時は何もしない)。"""
     output_path = os.environ.get("GITHUB_OUTPUT")
@@ -723,6 +706,22 @@ def select_repair_tickers(sb, jp_names: dict[str, str], target_date) -> dict[str
         f"(valid={len(valid_tickers)}, null={len(null_tickers)}, date={target_date.isoformat()})"
     )
     return repair_tickers
+
+
+def repair_inference_universe(sb, repair_tickers: dict[str, str], jp_names: dict[str, str], target_date) -> dict[str, str]:
+    """修復対象だけで業種平均・市場順位を作らず、通常更新の銘柄を比較対象に戻す。"""
+    rows = (
+        sb.table("signals").select("ticker, stocks(name)")
+        .eq("date", target_date.isoformat()).limit(1000).execute().data or []
+    )
+    universe = dict(repair_tickers)
+    for row in rows:
+        stock = row.get("stocks") or {}
+        if isinstance(stock, list):
+            stock = stock[0] if stock else {}
+        ticker = row["ticker"]
+        universe.setdefault(ticker, jp_names.get(ticker) or stock.get("name") or ticker)
+    return universe
 
 
 def get_screener_tickers(size: int = 50) -> dict[str, str]:
@@ -925,10 +924,19 @@ def main():
 
     from train_model import repair_price_glitches
 
+    # 欠損がある日の修復時だけ、通常更新済みの銘柄履歴もML比較用に取得する。
+    # 小さな修復集合から業種平均・cs_rankを計算すると通常更新と特徴量が変わる。
+    # 比較用銘柄のprices/signalsは再保存しない。修復対象0件の日はここへ到達しない。
+    inference_tickers = (
+        repair_inference_universe(sb, all_tickers, jp_names, market_date_expected)
+        if repair_only and model_bundle is not None else all_tickers
+    )
+    if len(inference_tickers) != len(all_tickers):
+        print(f"修復推論の比較ユニバース: {len(inference_tickers)}銘柄 (保存対象{len(all_tickers)}銘柄)")
     histories = {}
     all_price_rows = []
     close_validation = {}
-    for ticker in all_tickers:
+    for ticker in inference_tickers:
         hist = yf.Ticker(ticker).history(period=INFERENCE_HISTORY_PERIOD)
         if hist.empty:
             print(f"skip {ticker}: no data")
@@ -939,7 +947,7 @@ def main():
 
         # yfinanceが当日分の未確定データ(取引時間中の暫定値、寄り付き前の前日値など)を
         # 返すことがあるため、日本時間の本日より先の日付の行は除外する。
-        # さらに、東証の取引終了時刻(15:00 JST)より前にバッチが実行された場合は
+        # さらに、東証の取引終了時刻(15:30 JST)より前にバッチが実行された場合は
         # 当日分そのものが未確定(まだ当日終値が確定していない)ため、当日分も除外する。
         # これを怠ると、取引時間中の暫定値が「当日終値」として保存され、
         # ポートフォリオの評価額が実際の当日終値と一致しなくなる。
@@ -952,7 +960,7 @@ def main():
         # 上書きしてしまう。欠損行は保存・シグナル計算の両方から除外する。
         # 終値だけ欠損するケースではOHLC全体も不確定であるため、再取得に任せる。
         current_date_rows = hist[hist["date"] == cutoff_date]
-        if after_market_close and ticker in CLOSE_VALIDATION_TICKERS and not current_date_rows.empty:
+        if after_market_close and ticker in all_tickers and ticker in CLOSE_VALIDATION_TICKERS and not current_date_rows.empty:
             close_validation[ticker] = current_date_rows["Close"].notna().any()
         missing_close_rows = int(hist["Close"].isna().sum())
         if missing_close_rows:
@@ -987,7 +995,8 @@ def main():
             }
             for _, r in hist.tail(30).iterrows()
         ]
-        all_price_rows.extend(price_rows)
+        if ticker in all_tickers:
+            all_price_rows.extend(price_rows)
         histories[ticker] = hist
 
     # yfinanceが市場日を返しているのに代表銘柄の終値が欠損している場合は、
@@ -1047,9 +1056,16 @@ def main():
     signal_results = []
     all_signal_rows = []
     for ticker, hist in histories.items():
+        if ticker not in all_tickers:
+            continue
         # 最新日のシグナルを保存
         latest = hist.iloc[-1]
         market_date = latest["date"]
+        # 取引停止・取得遅延などで最新日が欠けた銘柄の過去シグナルを、現在のモデル・
+        # 市場順位で再計算して上書きしない。価格履歴の補充だけを行い、当日の判定は見送る。
+        if market_date != market_date_expected:
+            print(f"::warning::{ticker}: 最新取引日{market_date_expected}の価格がないためシグナル更新を見送ります")
+            continue
         signal, score = make_signal(latest)
         ml_signal, ml_score, ml_threshold, ml_block_reasons = predict_ml(
             model_bundle,

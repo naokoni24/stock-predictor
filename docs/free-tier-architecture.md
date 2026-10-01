@@ -124,15 +124,15 @@ GitHub Actionsのログに以下を出す。
   `src/app/api/cron/repair-check/route.ts`を呼び出す。判定ロジックが冪等
   (queued/in_progress/success済みなら何もしない)なので、2本立てても正規の実行や
   もう一方のcronと競合しない。
-  GitHub Actions側のdaily-signals.ymlのcronは当初、東証取引終了(15:00 JST)後の
+  GitHub Actions側のdaily-signals.ymlのcronは当初、東証取引終了(15:30 JST)後の
   15:30/17:00に設定していたが、キリの良い分がGitHub公式の言う混雑時間帯に当たる
   ことを避けて15:37/17:12へ調整(2026-09-04)。しかしその後も改善せず、
   2026-09-04〜06の3日間の実測でscheduleイベント自体が4〜6時間規模で恒常的に
   遅延することが判明したため、`scripts/fetch_and_signal.py`側の安全策
-  (`MARKET_CLOSE_HOUR_JST`、取引終了前の実行時は当日分を除外するため前倒しして
+  (`market_calendar.py`、取引終了前の実行時は当日分を除外するため前倒しして
   も実害がない)を前提に、本実行11:37 JST・修復実行13:37 JSTへ大きく前倒しした(2026-09-26にさらに1時間早め、10:37/12:37)
   (2026-09-07)。
-- このAPIはGitHub REST APIで`daily-signals.yml`の本日(JST)の取引終了(15:00)以降に
+- このAPIはGitHub REST APIで`daily-signals.yml`の本日(JST)の取引終了(15:30)以降に
   開始した実行履歴を確認し、queued/in_progress中、または既にsuccessで完了した実行が
   1件もない場合だけ、修復モード(`repair_only=1`)で`workflow_dispatch`を起動する。
   取引終了前に開始した実行は当日分を除外して前営業日までしか処理しないため、

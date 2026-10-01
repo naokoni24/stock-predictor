@@ -43,34 +43,34 @@ export default async function HoldingsPage({
     .select("id, ticker, shares, cost_price, stocks(name)")
     .order("id");
 
-  const tickers = (holdings ?? []).map((h) => h.ticker);
-  const signalFetchLimit = Math.min(Math.max(tickers.length * 5, 50), 500);
+  const tickers = [...new Set((holdings ?? []).map((h) => h.ticker))];
+  // 全銘柄共通の件数上限だと、更新が止まった銘柄の行が他銘柄の履歴に押し出される。
+  // 銘柄ごとに必要な2終値と最新指標だけを取得し、価格はsignalsより新しいpricesを使う。
+  const quotes = await Promise.all(tickers.map(async (ticker) => {
+    const [prices, signal] = await Promise.all([
+      supabase.from("prices").select("date, close").eq("ticker", ticker)
+        .not("close", "is", null).order("date", { ascending: false }).limit(2),
+      supabase.from("signals").select("date, close, signal, rsi14").eq("ticker", ticker)
+        .not("close", "is", null).order("date", { ascending: false }).limit(1).maybeSingle(),
+    ]);
+    return { ticker, prices, signal };
+  }));
+  const quoteErrors = [...new Set(quotes.flatMap((q) => [q.prices.error?.message, q.signal.error?.message]).filter(Boolean))];
 
-  const { data: latestSignals } = tickers.length
-    ? await supabase
-        .from("signals")
-        .select("ticker, date, close, signal, rsi14")
-        .in("ticker", tickers)
-        .order("date", { ascending: false })
-        .limit(signalFetchLimit)
-    : { data: [] };
-
-  // 各銘柄の最新シグナルのみ残す。yfinanceが当日終値をまだ確定配信していない
-  // 日はcloseがnullで保存されるため、そのような行は使わず直近の有効な行を使う
-  // (評価額が取得額にフォールバックして損益が不自然に見える不具合の修正)。
-  // 前日比を出すため、直近の有効な行に加えてその1つ前の有効な行(前営業日終値)も保持する。
   const latestByTicker = new Map<
     string,
     { close: number; date: string; signal: string | null; rsi14: number | null }
   >();
   const prevCloseByTicker = new Map<string, number>();
-  for (const s of latestSignals ?? []) {
-    if (s.close == null) continue;
-    if (!latestByTicker.has(s.ticker)) {
-      latestByTicker.set(s.ticker, { close: s.close, date: s.date, signal: s.signal, rsi14: s.rsi14 });
-    } else if (!prevCloseByTicker.has(s.ticker)) {
-      prevCloseByTicker.set(s.ticker, s.close);
-    }
+  for (const { ticker, prices, signal } of quotes) {
+    const latest = prices.data?.[0] ?? signal.data;
+    if (!latest || latest.close == null) continue;
+    latestByTicker.set(ticker, {
+      close: latest.close, date: latest.date,
+      signal: signal.data?.signal ?? null, rsi14: signal.data?.rsi14 ?? null,
+    });
+    const prev = prices.data?.[1];
+    if (prev?.close != null) prevCloseByTicker.set(ticker, prev.close);
   }
 
   const rows = (holdings ?? []).map((h) => {
@@ -234,6 +234,12 @@ export default async function HoldingsPage({
       <HoldingsForm error={formError} collapsedByDefault={rows.length > 0} holdingsCount={rows.length} />
 
       {error && <p className="text-bearish text-sm">データ取得エラー: {error.message}</p>}
+      {quoteErrors.length > 0 && (
+        <p className="text-bearish text-sm">株価・指標取得エラー: {quoteErrors.join(" / ")}</p>
+      )}
+      {rows.some((r) => r.marketValue == null) && (
+        <p className="text-sm text-muted-foreground">終値未取得の銘柄は、評価額と資産配分の合計に取得額を使用しています。</p>
+      )}
 
       {!error && rows.length === 0 && (
         <div className="flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-border py-12 text-center">

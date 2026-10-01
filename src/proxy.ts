@@ -30,16 +30,24 @@ export async function proxy(request: NextRequest) {
 
   const PUBLIC_PATHS = ["/login", "/forgot-password", "/reset-password"];
 
+  // getUser()が更新・削除した認証Cookieを、リダイレクト先へのレスポンスにも引き継ぐ。
+  // NextResponse.redirectを直接返すとsetAllで更新したCookieが失われる。
+  const redirectWithCookies = (url: URL) => {
+    const redirect = NextResponse.redirect(url);
+    response.cookies.getAll().forEach((cookie) => redirect.cookies.set(cookie));
+    return redirect;
+  };
+
   if (!user && !PUBLIC_PATHS.includes(request.nextUrl.pathname)) {
     const url = request.nextUrl.clone();
     url.pathname = "/login";
-    return NextResponse.redirect(url);
+    return redirectWithCookies(url);
   }
 
   if (user && request.nextUrl.pathname === "/login") {
     const url = request.nextUrl.clone();
     url.pathname = "/";
-    return NextResponse.redirect(url);
+    return redirectWithCookies(url);
   }
 
   return response;

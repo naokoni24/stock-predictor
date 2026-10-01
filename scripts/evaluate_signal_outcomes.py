@@ -7,6 +7,7 @@ from datetime import date, timedelta
 import pandas as pd
 import yfinance as yf
 from supabase import create_client
+from market_calendar import next_trading_dates
 
 OUTCOME_HORIZON_DAYS = 5
 TRANSACTION_COST = 0.002
@@ -28,13 +29,25 @@ def _sector_from_joined_stock(value) -> str | None:
 
 
 def _valid_price(value) -> bool:
-    return value is not None and pd.notna(value) and float(value) > 0
+    return value is not None and pd.notna(value) and 0 < float(value) < float("inf")
+
+
+def trading_window(prices: list[dict], signal_date: str) -> list[dict] | None:
+    """約定・決済日に欠損がある場合、別の日の価格で期間を延長せず確定を待つ。"""
+    by_date = {price["date"]: price for price in prices}
+    window = []
+    for trading_date in next_trading_dates(signal_date, OUTCOME_HORIZON_DAYS + 1):
+        price = by_date.get(trading_date)
+        if price is None or not _valid_price(price.get("open")):
+            return None
+        window.append(price)
+    return window
 
 
 def simulate_trade(prices: list[dict], signal_date: str) -> dict | None:
     """翌営業日始値で約定し、損切りまたは5営業日後始値で決済する。"""
-    future = [price for price in prices if price["date"] > signal_date and _valid_price(price.get("open"))]
-    if len(future) < OUTCOME_HORIZON_DAYS + 1:
+    future = trading_window(prices, signal_date)
+    if future is None:
         return None
 
     entry = future[0]
@@ -69,8 +82,8 @@ def simulate_trade(prices: list[dict], signal_date: str) -> dict | None:
 
 def topix_return(prices: list[dict], signal_date: str) -> float | None:
     """TOPIX連動ETFの始値リターンを返す。ベンチマークには損切りを適用しない。"""
-    future = [price for price in prices if price["date"] > signal_date and _valid_price(price.get("open"))]
-    if len(future) < OUTCOME_HORIZON_DAYS + 1:
+    future = trading_window(prices, signal_date)
+    if future is None:
         return None
     return float(future[OUTCOME_HORIZON_DAYS]["open"]) / float(future[0]["open"]) - 1
 
