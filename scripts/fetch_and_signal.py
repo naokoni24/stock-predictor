@@ -716,6 +716,8 @@ def select_repair_tickers(sb, jp_names: dict[str, str], target_date) -> dict[str
     candidates: OrderedDict[str, str] = OrderedDict()
     add_candidates(candidates, TICKERS, jp_names, "repair fixed tickers")
     add_candidates(candidates, get_holdings_tickers(sb), jp_names, "repair holdings")
+    # 通常更新と同じ優先順位。漏れるとウォッチリスト銘柄の欠損終値が修復されず更新待ちのままになる。
+    add_candidates(candidates, get_watchlist_tickers(sb), jp_names, "repair watchlists")
     add_candidates(candidates, get_previous_signal_tickers(sb), jp_names, "repair previous signals")
     add_candidates(
         candidates,

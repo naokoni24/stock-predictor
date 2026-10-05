@@ -7,8 +7,8 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 
 from market_calendar import get_market_cutoff, is_jpx_trading_day, next_trading_dates
-from evaluate_signal_outcomes import simulate_trade, topix_return
-from fetch_and_signal import limit_ml_buy_candidates, make_signal, repair_inference_universe, upsert_in_chunks, get_watchlist_tickers, select_daily_tickers
+from evaluate_signal_outcomes import build_outcome_rows, find_unsettled_candidates, simulate_trade, topix_return
+from fetch_and_signal import limit_ml_buy_candidates, make_signal, repair_inference_universe, upsert_in_chunks, get_watchlist_tickers, select_daily_tickers, select_repair_tickers
 from train_model import add_breadth_features, compute_barrier_outcome
 
 
@@ -73,6 +73,25 @@ class OutcomeTests(unittest.TestCase):
         self.prices[1]["low"] = float("inf")
         self.assertIsNone(simulate_trade(self.prices, self.signal_date))
 
+    def test_candidate_dropped_from_universe_is_supplemented(self):
+        signals = [{"ticker": "9999.T", "date": self.signal_date}]
+        peers = [dict(r, ticker=t) for t in ["1111.T", "2222.T"] for r in self.prices]
+        dropped = [dict(r, ticker="9999.T") for r in self.prices[:1]]
+        # 評価期間が終わり、DBの価格だけでは確定できない候補だけを補完対象にする。
+        self.assertEqual(find_unsettled_candidates(signals, peers + dropped, set(), date(2026, 10, 5)), {"9999.T": self.signal_date})
+        self.assertEqual(find_unsettled_candidates(signals, peers + dropped, set(), date(2026, 10, 2)), {})
+        self.assertEqual(find_unsettled_candidates(signals, peers + dropped, {("9999.T", self.signal_date)}, date(2026, 10, 5)), {})
+        sectors = {"9999.T": "電気機器", "1111.T": "電気機器", "2222.T": "電気機器"}
+        self.assertEqual(build_outcome_rows(signals, peers + dropped, sectors, []), [])
+        own = [dict(r, ticker="9999.T", open=200 + 10 * i, low=199 + 10 * i) for i, r in enumerate(self.prices)]
+        rows = build_outcome_rows(signals, peers + dropped, sectors, [], own)
+        self.assertEqual(len(rows), 1)
+        self.assertAlmostEqual(rows[0]["gross_return"], 0.25)
+        # 補完価格は候補自身の計算だけに使い、他の候補のベンチマーク比較銘柄には加えない。
+        self.assertAlmostEqual(rows[0]["benchmark_return"], 0.05)
+        peer_rows = build_outcome_rows([{"ticker": "1111.T", "date": self.signal_date}], peers, sectors, [], own)
+        self.assertAlmostEqual(peer_rows[0]["benchmark_return"], 0.05)
+
 
 class SignalTests(unittest.TestCase):
     def test_watchlists_deduplicate_and_limit(self):
@@ -99,6 +118,17 @@ class SignalTests(unittest.TestCase):
             result = select_daily_tickers(MagicMock(), {})
         self.assertEqual(len(result), 150)
         self.assertEqual(list(result)[:3], ["7203.T", "6758.T", "9984.T"])
+
+    def test_repair_includes_watchlists(self):
+        sb = MagicMock()
+        sb.table.return_value.select.return_value.eq.return_value.execute.return_value.data = [
+            {"ticker": "7203.T", "close": 3000},
+        ]
+        with patch("fetch_and_signal.TICKERS", {"7203.T": "固定"}), \
+             patch("fetch_and_signal.get_holdings_tickers", return_value={}), \
+             patch("fetch_and_signal.get_watchlist_tickers", return_value={"9984.T": "監視"}), \
+             patch("fetch_and_signal.get_previous_signal_tickers", return_value={}):
+            self.assertEqual(select_repair_tickers(sb, {}, date(2026, 10, 2)), {"9984.T": "監視"})
 
     def test_price_scale_invariance_and_score_sign(self):
         row = {"Close": 100, "sma25": 102, "sma75": 100, "rsi14": 45, "macd": 2, "macd_signal": 1, "bb_upper": 110, "bb_lower": 90}

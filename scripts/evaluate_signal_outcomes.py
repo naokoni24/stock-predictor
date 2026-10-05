@@ -2,12 +2,13 @@
 
 import os
 from collections import defaultdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import yfinance as yf
 from supabase import create_client
-from market_calendar import next_trading_dates
+from market_calendar import get_market_cutoff, next_trading_dates
 
 OUTCOME_HORIZON_DAYS = 5
 TRANSACTION_COST = 0.002
@@ -88,17 +89,50 @@ def topix_return(prices: list[dict], signal_date: str) -> float | None:
     return float(future[OUTCOME_HORIZON_DAYS]["open"]) / float(future[0]["open"]) - 1
 
 
-def build_outcome_rows(
-    signal_rows: list[dict], price_rows: list[dict], sector_by_ticker: dict[str, str | None],
-    topix_prices: list[dict],
-) -> list[dict]:
-    """候補と価格履歴から、学習と同一条件の超過リターン実績を作る(外部I/Oなし)。"""
+def _group_prices_by_ticker(price_rows: list[dict]) -> dict[str, list[dict]]:
     prices_by_ticker: dict[str, list[dict]] = defaultdict(list)
     for price in price_rows:
         if _valid_price(price.get("open")):
             prices_by_ticker[price["ticker"]].append(price)
     for prices in prices_by_ticker.values():
         prices.sort(key=lambda row: row["date"])
+    return prices_by_ticker
+
+
+def find_unsettled_candidates(
+    signal_rows: list[dict], price_rows: list[dict], settled_keys: set[tuple[str, str]], cutoff_date: date,
+) -> dict[str, str]:
+    """評価期間が終わったのにDBの価格だけでは確定できない候補を、銘柄→最古シグナル日で返す。
+
+    AI買い候補の銘柄が翌日以降の日次分析対象(150銘柄)から外れると、pricesの保存が
+    止まり、実績台帳に永久に入らなかった(2026-09は買い候補の約3割)。
+    """
+    prices_by_ticker = _group_prices_by_ticker(price_rows)
+    since_by_ticker: dict[str, str] = {}
+    for signal in signal_rows:
+        ticker, signal_date = signal.get("ticker"), signal.get("date")
+        if not ticker or not signal_date or (ticker, signal_date) in settled_keys:
+            continue
+        window_end = next_trading_dates(signal_date, OUTCOME_HORIZON_DAYS + 1)[-1]
+        if window_end > cutoff_date.isoformat():
+            continue
+        if simulate_trade(prices_by_ticker.get(ticker, []), signal_date) is not None:
+            continue
+        since_by_ticker[ticker] = min(since_by_ticker.get(ticker, signal_date), signal_date)
+    return since_by_ticker
+
+
+def build_outcome_rows(
+    signal_rows: list[dict], price_rows: list[dict], sector_by_ticker: dict[str, str | None],
+    topix_prices: list[dict], own_price_rows: list[dict] | None = None,
+) -> list[dict]:
+    """候補と価格履歴から、学習と同一条件の超過リターン実績を作る(外部I/Oなし)。
+
+    own_price_rowsは分析対象から外れた候補の補完価格。候補自身の約定計算だけに使い、
+    業種ベンチマークの比較銘柄には加えない(既存実績のベンチマーク構成を変えないため)。
+    """
+    prices_by_ticker = _group_prices_by_ticker(price_rows)
+    own_prices_by_ticker = _group_prices_by_ticker(own_price_rows or [])
 
     simulations: dict[tuple[str, str], dict | None] = {}
     outcomes = []
@@ -108,6 +142,8 @@ def build_outcome_rows(
         if not ticker or not signal_date:
             continue
         own = simulate_trade(prices_by_ticker.get(ticker, []), signal_date)
+        if own is None and ticker in own_prices_by_ticker:
+            own = simulate_trade(own_prices_by_ticker[ticker], signal_date)
         if own is None:
             continue
 
@@ -226,6 +262,38 @@ def fetch_topix_prices(since: str, today: date) -> list[dict]:
     ]
 
 
+def fetch_candidate_prices(since_by_ticker: dict[str, str], cutoff_date: date) -> list[dict]:
+    """分析対象から外れた候補の始値・安値を無料のyfinanceから取得する(DBには保存しない)。
+
+    日次取得と同じ既定の調整済み価格・桁ずれ補修を使い、未確定のcutoff_date後は除外する。
+    """
+    from train_model import repair_price_glitches
+
+    rows = []
+    for ticker, since in sorted(since_by_ticker.items()):
+        try:
+            history = yf.Ticker(ticker).history(
+                start=since, end=(cutoff_date + timedelta(days=1)).isoformat()
+            )
+        except Exception as exc:
+            print(f"候補の価格補完に失敗 {ticker}: {exc}")
+            continue
+        if history.empty:
+            continue
+        history = repair_price_glitches(history.reset_index())
+        for _, row in history.iterrows():
+            trading_date = pd.to_datetime(row["Date"]).date()
+            if trading_date > cutoff_date:
+                continue
+            rows.append({
+                "ticker": ticker,
+                "date": trading_date.isoformat(),
+                "open": None if pd.isna(row["Open"]) else float(row["Open"]),
+                "low": None if pd.isna(row["Low"]) else float(row["Low"]),
+            })
+    return rows
+
+
 def main():
     sb = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_KEY"])
     today = date.today()
@@ -264,8 +332,26 @@ def main():
     for signal in signal_rows:
         sector_by_ticker.setdefault(signal["ticker"], _sector_from_joined_stock(signal.get("stocks")))
     price_rows = fetch_all_prices(sb, since, today.isoformat())
+    settled_rows = fetch_all_rows(
+        lambda: (
+            sb.table("signal_outcomes")
+            .select("ticker, signal_date")
+            .eq("evaluation_version", EVALUATION_VERSION)
+            .gte("signal_date", since)
+            .order("signal_date", desc=False)
+            .order("ticker", desc=False)
+        ),
+        "確定済み実績",
+    )
+    cutoff_date, _ = get_market_cutoff(datetime.now(ZoneInfo("Asia/Tokyo")))
+    unsettled = find_unsettled_candidates(
+        signal_rows, price_rows, {(row["ticker"], row["signal_date"]) for row in settled_rows}, cutoff_date
+    )
+    own_price_rows = fetch_candidate_prices(unsettled, cutoff_date) if unsettled else []
+    if unsettled:
+        print(f"分析対象外の候補の価格を補完: {len(unsettled)}銘柄")
     outcome_rows = build_outcome_rows(
-        signal_rows, price_rows, sector_by_ticker, fetch_topix_prices(since, today)
+        signal_rows, price_rows, sector_by_ticker, fetch_topix_prices(since, today), own_price_rows
     )
     if not outcome_rows:
         print("翌営業日始値から5営業日後始値までの評価期間が未確定のため、本番実績の追加はありません。")
