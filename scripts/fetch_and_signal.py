@@ -16,6 +16,7 @@
 import hashlib
 import math
 import os
+import re
 import signal
 import time
 from collections import OrderedDict
@@ -752,6 +753,12 @@ def repair_inference_universe(sb, repair_tickers: dict[str, str], jp_names: dict
     return universe
 
 
+# 東証の4桁コード(英字入りの新コードを含む)。Yahooのスクリーナーは福証・札証の重複上場を
+# "5802@F.T"/"7011@S.T"のように別銘柄として返し、シグナルを計算できないまま日次分析枠を
+# 消費していた(2026-08〜09に28銘柄・80回)。
+TSE_TICKER_PATTERN = re.compile(r"[0-9][0-9A-Z]{3}\.T")
+
+
 def get_screener_tickers(size: int = 50) -> dict[str, str]:
     """Yahooファイナンスのスクリーニング(値上がり率/出来高 上位、日本株)から銘柄を取得"""
     queries = {
@@ -770,7 +777,7 @@ def get_screener_tickers(size: int = 50) -> dict[str, str]:
             res = yf.screen(query, sortField=sort_field, sortAsc=(name == "losers"), size=size)
             for item in res.get("quotes", []):
                 symbol = item.get("symbol")
-                if not symbol:
+                if not symbol or not TSE_TICKER_PATTERN.fullmatch(symbol):
                     continue
                 result[symbol] = item.get("shortName") or item.get("longName") or symbol
         except Exception as e:

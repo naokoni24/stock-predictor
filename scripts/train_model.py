@@ -1073,6 +1073,23 @@ def evaluate_threshold(
     }
 
 
+def bundle_out_of_sample_start(bundle: dict | None) -> str | None:
+    """既存モデルが学習・しきい値調整に使っていない期間の開始日(=そのモデルのテスト開始日)。
+
+    月次再学習の候補テスト期間(直近15%)は既存モデルの学習・検証期間と重なるため、
+    そのまま比較すると既存モデルが自分の学習データで評価されて有利になる。
+    test_start_dateを保存していない旧モデルは、昇格判定時のテストサブ期間の開始日で代用する。
+    """
+    if not bundle:
+        return None
+    if bundle.get("test_start_date"):
+        return str(bundle["test_start_date"])
+    sub_periods = (bundle.get("promotion") or {}).get("candidate_test_sub_periods") or []
+    if sub_periods and sub_periods[0].get("start"):
+        return str(sub_periods[0]["start"])
+    return None
+
+
 def evaluate_model_bundle(
     bundle: dict,
     evaluation_df: pd.DataFrame,
@@ -1409,8 +1426,13 @@ def should_promote_candidate(
     baseline: dict | None,
     candidate_test_sub_periods: list[dict] | None = None,
     walk_forward_results: list[dict] | None = None,
+    candidate_comparison: dict | None = None,
 ) -> tuple[bool, str]:
-    """再学習候補を本番モデルへ昇格させるかを決める。"""
+    """再学習候補を本番モデルへ昇格させるかを決める。
+
+    絶対値・期間安定性は候補のテスト期間全体(candidate)で判定し、既存モデルとの相対比較は
+    既存モデルにとっても未使用の期間で評価した候補成績(candidate_comparison)を使う。
+    """
     if candidate["avg_return"] < PROMOTION_MIN_AVG_RETURN:
         # ベースラインとの相対比較より先に絶対値を必ずチェックする。
         # ベースライン自体がマイナスの場合、相対改善だけでは絶対値マイナスの候補を弾けないため。
@@ -1458,6 +1480,9 @@ def should_promote_candidate(
         return True, "絶対値基準・期間安定性を満たし、比較可能な既存モデルもないため初回モデルとして保存"
     if candidate["trades"] < PROMOTION_MIN_TRADES:
         return False, f"候補の取引数不足 ({candidate['trades']} < {PROMOTION_MIN_TRADES})"
+    candidate = candidate_comparison or candidate
+    if candidate["trades"] < PROMOTION_MIN_TRADES:
+        return False, f"比較期間の候補取引数不足 ({candidate['trades']} < {PROMOTION_MIN_TRADES})"
     if baseline["trades"] < PROMOTION_MIN_TRADES:
         return True, f"既存モデルの取引数不足 ({baseline['trades']} < {PROMOTION_MIN_TRADES})"
 
@@ -2773,8 +2798,35 @@ def main():
 
     previous_eval = None
     previous_eval_error = None
+    candidate_comparison = None
     if previous_bundle is not None:
-        previous_eval, previous_eval_error = evaluate_model_bundle(previous_bundle, test_df)
+        comparison_df = test_df
+        comparison_start = bundle_out_of_sample_start(previous_bundle)
+        if comparison_start is not None:
+            mask = (pd.to_datetime(test_df["date"]) >= pd.Timestamp(comparison_start)).to_numpy()
+            if mask.any():
+                comparison_df = test_df[mask]
+                candidate_comparison = evaluate_threshold(
+                    np.asarray(test_scores)[mask],
+                    comparison_df["future_excess_return"].to_numpy(),
+                    ml_buy_threshold,
+                    comparison_df,
+                    comparison_df["sector_label"],
+                    sector_ml_buy_thresholds,
+                    market_regime_threshold_offsets,
+                    dates=comparison_df["date"],
+                    max_daily_candidates=max_daily_ml_buy_candidates,
+                    disagreements=np.asarray(test_disagreements)[mask],
+                    max_ensemble_disagreement=max_ensemble_disagreement,
+                )
+                print(
+                    f"既存モデルとの比較期間: {comparison_start}以降(既存モデルの学習・調整期間を除外) "
+                    f"候補 trades={candidate_comparison['trades']} "
+                    f"avg_return={candidate_comparison['avg_return'] * 100:.2f}%"
+                )
+        else:
+            print("既存モデルの未使用期間が不明なため、候補のテスト期間全体で比較します")
+        previous_eval, previous_eval_error = evaluate_model_bundle(previous_bundle, comparison_df)
         if previous_eval is not None:
             print(
                 "既存モデルの同一テスト期間評価: "
@@ -2787,7 +2839,7 @@ def main():
             print(f"既存モデル比較をスキップ: {previous_eval_error}")
 
     promote, promotion_reason = should_promote_candidate(
-        test_eval, previous_eval, test_sub_periods, walk_forward_results
+        test_eval, previous_eval, test_sub_periods, walk_forward_results, candidate_comparison
     )
     print(f"モデル昇格判定: {'昇格' if promote else '見送り'} — {promotion_reason}")
     print(
@@ -2901,6 +2953,9 @@ def main():
             "optuna_best_params": best,
             "optuna_best_value": study.best_value,
             "training_end_date": str(pd.to_datetime(train_df["date"].max()).date()),
+            # 次回の再学習で、このモデルにとって未使用の期間だけで新旧比較するために保存する。
+            "validation_end_date": str(pd.to_datetime(val_df["date"].max()).date()),
+            "test_start_date": str(pd.to_datetime(test_df["date"].min()).date()),
             "promotion": {
                 "promoted": promote,
                 "reason": promotion_reason,
@@ -2924,6 +2979,7 @@ def main():
                     "max_negative_period_return": PROMOTION_MAX_NEGATIVE_PERIOD_RETURN,
                 },
                 "baseline_test_eval": previous_eval,
+                "candidate_comparison_eval": candidate_comparison,
                 "baseline_comparison_error": previous_eval_error,
             },
         }

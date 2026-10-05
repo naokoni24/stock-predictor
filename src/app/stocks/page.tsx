@@ -31,18 +31,29 @@ async function fetchAllStocks(): Promise<{ stocks: StockRow[]; error: string | n
   return { stocks, error: null };
 }
 
-// 日次バッチは1日あたり最大150銘柄(MAX_DAILY_TICKERS)を処理するため、
-// 直近数日分をカバーできる件数を確保する(銘柄一覧の全件数には依存させない)。
-const SIGNAL_FETCH_LIMIT = 600;
-
 export default async function StocksPage() {
   const { stocks, error } = await fetchAllStocks();
 
-  const { data: signals, error: signalsError } = await supabase
+  // シグナルは最新の市場日に分析した銘柄だけ表示する。以前は直近600件から銘柄ごとの
+  // 最新行を集めており、分析対象から外れた銘柄の数日前のシグナルが日付表示なしに
+  // 現在の判定のように出ていた(トップページで2026-09-26に修正した問題と同じ)。
+  const { data: latestDateRow, error: latestDateError } = await supabase
     .from("signals")
-    .select("ticker, date, signal")
+    .select("date")
+    .not("close", "is", null)
     .order("date", { ascending: false })
-    .limit(SIGNAL_FETCH_LIMIT);
+    .limit(1)
+    .maybeSingle();
+  const latestSignalResult = latestDateRow?.date
+    ? await supabase
+        .from("signals")
+        .select("ticker, date, signal")
+        .eq("date", latestDateRow.date)
+        .not("close", "is", null)
+        .limit(1000)
+    : { data: [], error: null };
+  const signals = latestSignalResult.data;
+  const signalsError = latestDateError ?? latestSignalResult.error;
 
   const latestSignalByTicker = new Map<string, string | null>();
   for (const s of signals ?? []) {
@@ -62,6 +73,7 @@ export default async function StocksPage() {
         <h1 className="text-2xl font-bold tracking-tight">登録銘柄一覧</h1>
         <p className="text-sm text-muted-foreground mt-1">
           監視対象銘柄を検索して詳細を確認(全{rows.length}銘柄)
+          {latestDateRow?.date && `・シグナルは${latestDateRow.date}に分析した銘柄のみ表示`}
         </p>
       </div>
 

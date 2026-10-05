@@ -407,7 +407,14 @@ export default async function Home() {
                   <div className="flex items-center justify-between">
                     <span className="text-sm text-muted-foreground">AI相対スコア</span>
                     {topPick.ml_score != null ? (
-                      <span className="font-semibold tabular-nums text-bullish">
+                      <span
+                        className={cn(
+                          "font-semibold tabular-nums",
+                          topPick.ml_threshold == null || topPick.ml_score >= topPick.ml_threshold
+                            ? "text-bullish"
+                            : "text-bearish"
+                        )}
+                      >
                         {(topPick.ml_score * 100).toFixed(0)}
                       </span>
                     ) : (
@@ -459,14 +466,18 @@ export default async function Home() {
               {performance.error && (
                 <p className="text-bearish text-sm">データ取得エラー: {performance.error.message}</p>
               )}
-              {!performance.error && !performance.recent && (
+              {!performance.error && !performance.recent && !performance.longer && (
                 <p className="text-sm leading-relaxed text-muted-foreground">
                   AI買い候補を5営業日後に評価します。最初の成績は5営業日後から表示されます。
                 </p>
               )}
-              {performance.recent && (
+              {(performance.recent || performance.longer) && (
                 <div className="flex flex-col gap-3">
-                  <PerformanceRow label="直近30日" stats={performance.recent} />
+                  {performance.recent ? (
+                    <PerformanceRow label="直近30日" stats={performance.recent} />
+                  ) : (
+                    <p className="text-sm text-muted-foreground">直近30日の確定実績はありません。</p>
+                  )}
                   {performance.longer && <PerformanceRow label="直近90日" stats={performance.longer} />}
                   <p className="text-xs leading-relaxed text-muted-foreground">
                     翌営業日始値で約定し、8%損切りまたは5営業日後始値で決済。業種/TOPIXに対する超過リターンから往復コスト0.2%を控除した参考値です。
@@ -502,7 +513,8 @@ export default async function Home() {
               <div className="flex flex-col gap-3">
                 {news.rows.map((n) => (
                   <a
-                    key={n.url}
+                    // 同じ記事が複数銘柄に紐づく場合があるため、銘柄とURLの組で識別する
+                    key={`${n.ticker}-${n.url}`}
                     href={n.url}
                     target="_blank"
                     rel="noopener noreferrer"

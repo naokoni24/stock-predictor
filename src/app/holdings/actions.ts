@@ -18,6 +18,12 @@ export async function addHolding(formData: FormData) {
     redirectWithError("ティッカーを入力してください。");
   }
 
+  // 日次分析は東証の4桁コード(例: 7203.T、285A.T)だけを扱う。形式外の値を銘柄マスタ・
+  // 保有株へ登録すると、毎日の分析枠を消費したまま株価を取得できない。
+  if (!/^[0-9][0-9A-Z]{3}\.T$/.test(ticker)) {
+    redirectWithError("証券コードは4桁(例: 7203)で入力してください。");
+  }
+
   if (!Number.isFinite(shares) || shares <= 0) {
     redirectWithError("株数は0より大きい数値で入力してください。");
   }

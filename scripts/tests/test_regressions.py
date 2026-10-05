@@ -8,8 +8,8 @@ import pandas as pd
 
 from market_calendar import get_market_cutoff, is_jpx_trading_day, next_trading_dates
 from evaluate_signal_outcomes import build_outcome_rows, select_dates_to_settle, simulate_trade, tickers_missing_prices, topix_return
-from fetch_and_signal import limit_ml_buy_candidates, make_signal, repair_inference_universe, upsert_in_chunks, get_watchlist_tickers, select_daily_tickers, select_repair_tickers
-from train_model import add_breadth_features, compute_barrier_outcome
+from fetch_and_signal import limit_ml_buy_candidates, make_signal, repair_inference_universe, upsert_in_chunks, get_screener_tickers, get_watchlist_tickers, select_daily_tickers, select_repair_tickers
+from train_model import add_breadth_features, bundle_out_of_sample_start, compute_barrier_outcome, should_promote_candidate
 
 
 class MarketCalendarTests(unittest.TestCase):
@@ -148,6 +148,11 @@ class SignalTests(unittest.TestCase):
         self.assertEqual(len(result), 150)
         self.assertEqual(list(result)[:3], ["7203.T", "6758.T", "9984.T"])
 
+    def test_screener_skips_duplicate_regional_listings(self):
+        quotes = {"quotes": [{"symbol": s, "shortName": s} for s in ["7203.T", "285A.T", "5802@F.T", "7011@S.T", "AAPL", ""]]}
+        with patch("fetch_and_signal.yf.screen", return_value=quotes):
+            self.assertEqual(set(get_screener_tickers()), {"7203.T", "285A.T"})
+
     def test_repair_includes_watchlists(self):
         sb = MagicMock()
         sb.table.return_value.select.return_value.eq.return_value.execute.return_value.data = [
@@ -205,6 +210,37 @@ class SignalTests(unittest.TestCase):
         with patch("fetch_and_signal.time.sleep"):
             upsert_in_chunks(table, [{"ticker": "7203.T"}])
         self.assertEqual(table.upsert.return_value.execute.call_count, 2)
+
+
+
+class PromotionTests(unittest.TestCase):
+    def evaluation(self, avg_return, trades=500, win_rate=0.5):
+        return {"avg_return": avg_return, "trades": trades, "win_rate": win_rate, "objective": avg_return}
+
+    def test_out_of_sample_start(self):
+        self.assertEqual(bundle_out_of_sample_start({"test_start_date": "2026-09-01"}), "2026-09-01")
+        legacy = {"promotion": {"candidate_test_sub_periods": [{"start": "2026-06-02"}, {"start": "2026-06-30"}]}}
+        self.assertEqual(bundle_out_of_sample_start(legacy), "2026-06-02")
+        self.assertIsNone(bundle_out_of_sample_start({}))
+        self.assertIsNone(bundle_out_of_sample_start(None))
+
+    def test_relative_comparison_uses_shared_unseen_period(self):
+        folds = [{"evaluation": {"trades": 100, "avg_return": 0.001}}] * 3
+        periods = [{"avg_return": 0.002}] * 3
+        candidate = self.evaluation(0.002)
+        # 既存モデルは自分の学習期間を含む全期間だと+0.5%に見えるが、共通の未使用期間では候補が上回る。
+        self.assertFalse(should_promote_candidate(candidate, self.evaluation(0.005), periods, folds)[0])
+        promote, reason = should_promote_candidate(
+            candidate, self.evaluation(0.001), periods, folds, self.evaluation(0.003, trades=200)
+        )
+        self.assertTrue(promote, reason)
+        # 比較期間の取引数が少なすぎる場合は昇格させない。絶対値の基準は全テスト期間で判定する。
+        self.assertFalse(should_promote_candidate(
+            candidate, self.evaluation(0.001), periods, folds, self.evaluation(0.01, trades=5)
+        )[0])
+        self.assertFalse(should_promote_candidate(
+            self.evaluation(-0.001), self.evaluation(-0.01), periods, folds, self.evaluation(0.01)
+        )[0])
 
 
 if __name__ == "__main__":
