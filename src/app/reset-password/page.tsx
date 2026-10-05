@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { LineChart } from "lucide-react";
 import { createClient } from "@/lib/supabase-browser";
+import { authErrorMessage } from "@/lib/auth-errors";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
@@ -27,7 +28,7 @@ export default function ResetPasswordPage() {
     setSubmitting(false);
 
     if (error) {
-      setError(error.message);
+      setError(authErrorMessage(error, "パスワードを更新できませんでした。時間をおいて再度お試しください。"));
       return;
     }
 

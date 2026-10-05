@@ -2,6 +2,7 @@
 
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase-server";
+import { authErrorMessage } from "@/lib/auth-errors";
 
 export async function login(formData: FormData) {
   const email = formData.get("email") as string;
@@ -14,7 +15,9 @@ export async function login(formData: FormData) {
   });
 
   if (error) {
-    redirect(`/login?error=${encodeURIComponent(error.message)}`);
+    redirect(
+      `/login?error=${encodeURIComponent(authErrorMessage(error, "ログインできませんでした。時間をおいて再度お試しください。"))}`
+    );
   }
 
   redirect("/");

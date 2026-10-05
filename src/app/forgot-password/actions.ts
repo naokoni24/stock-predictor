@@ -3,6 +3,7 @@
 import { redirect } from "next/navigation";
 import { headers } from "next/headers";
 import { createClient } from "@/lib/supabase-server";
+import { authErrorMessage } from "@/lib/auth-errors";
 
 function getRequestOrigin(headerList: Awaited<ReturnType<typeof headers>>) {
   const origin = headerList.get("origin");
@@ -43,7 +44,9 @@ export async function sendResetEmail(formData: FormData) {
   });
 
   if (error) {
-    redirect(`/forgot-password?error=${encodeURIComponent(error.message)}`);
+    redirect(
+      `/forgot-password?error=${encodeURIComponent(authErrorMessage(error, "再設定メールを送信できませんでした。時間をおいて再度お試しください。"))}`
+    );
   }
 
   redirect("/forgot-password?sent=1");

@@ -63,7 +63,8 @@ export async function addHolding(formData: FormData) {
           "この銘柄はまだ日次更新の対象になっていないため追加できません。翌営業日の更新後に再度お試しください。"
         );
       }
-      redirectWithError(stockError.message);
+      console.error("銘柄マスタ登録エラー:", stockError.code, stockError.message);
+      redirectWithError("銘柄を登録できませんでした。証券コードを確認して、時間をおいて再度お試しください。");
     }
   }
 
@@ -75,7 +76,8 @@ export async function addHolding(formData: FormData) {
   });
 
   if (holdingError) {
-    redirectWithError(holdingError.message);
+    console.error("保有株登録エラー:", holdingError.code, holdingError.message);
+    redirectWithError("保有株を追加できませんでした。時間をおいて再度お試しください。");
   }
 
   revalidatePath("/holdings");
@@ -99,7 +101,8 @@ export async function deleteHolding(id: number) {
     .eq("user_id", user.id);
 
   if (error) {
-    redirectWithError(error.message);
+    console.error("保有株削除エラー:", error.code, error.message);
+    redirectWithError("保有株を削除できませんでした。時間をおいて再度お試しください。");
   }
 
   revalidatePath("/holdings");

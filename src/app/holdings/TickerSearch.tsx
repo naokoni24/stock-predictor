@@ -41,8 +41,9 @@ export default function TickerSearch({ allowManual = true }: { allowManual?: boo
       // (かつエラーを読んでいなかったため無反応に見えていた)。name/tickerを別クエリに
       // 分けて実行しmerge・重複除去することでこの問題を避ける。
       const [byName, byTicker] = await Promise.all([
-        supabase.from("stocks").select("ticker, name").ilike("name", `%${query}%`).limit(8).abortSignal(controller.signal),
-        supabase.from("stocks").select("ticker, name").ilike("ticker", `%${query}%`).limit(8).abortSignal(controller.signal),
+        // 福証・札証の重複コード("5802@F.T"等)は日次分析・保存の対象外のため候補に出さない
+        supabase.from("stocks").select("ticker, name").ilike("name", `%${query}%`).not("ticker", "like", "%@%").limit(8).abortSignal(controller.signal),
+        supabase.from("stocks").select("ticker, name").ilike("ticker", `%${query}%`).not("ticker", "like", "%@%").limit(8).abortSignal(controller.signal),
       ]);
       // 古い検索の応答が遅れて届いても、現在の候補や選択済み銘柄を上書きしない。
       if (cancelled) return;

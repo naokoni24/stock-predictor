@@ -13,6 +13,8 @@ async function fetchAllStocks(): Promise<{ stocks: StockRow[]; error: string | n
     const { data, error } = await supabase
       .from("stocks")
       .select("ticker, name, sector")
+      // 福証・札証の重複コード("5802@F.T"等)は東証銘柄と重複するため一覧に出さない
+      .not("ticker", "like", "%@%")
       .order("ticker")
       .range(from, from + STOCKS_PAGE_SIZE - 1);
 
