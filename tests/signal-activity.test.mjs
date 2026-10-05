@@ -184,7 +184,7 @@ const outcome = {
   ml_score: 0.65,
   model_version: "v1",
   sector: "輸送用機器",
-  evaluation_version: "next_open_stop_excess_v1",
+  evaluation_version: "next_open_stop_excess_v2",
 };
 const now = new Date("2026-09-30T15:30:00Z");
 test("実績の期間はJSTで判定し、旧定義・未来・null・無限値を除外する", () => {

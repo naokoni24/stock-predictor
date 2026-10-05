@@ -95,7 +95,7 @@ test("認証更新・削除Cookieをリダイレクト時も維持する", async
 });
 
 test("本番成績が1000行を超えても90日分をページングして集計する", async () => {
-  const all = Array.from({ length: 1505 }, () => ({ outcome_date: new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Tokyo" }), net_return: 0.01, model_version: "test", evaluation_version: "next_open_stop_excess_v1" }));
+  const all = Array.from({ length: 1505 }, () => ({ outcome_date: new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Tokyo" }), net_return: 0.01, model_version: "test", evaluation_version: "next_open_stop_excess_v2" }));
   const ranges = [];
   const query = () => {
     let range;

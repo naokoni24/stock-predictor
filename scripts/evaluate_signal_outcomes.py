@@ -1,6 +1,7 @@
 """本番AI買い候補を、学習・バックテストと同じ約定条件で確定評価して保存する。"""
 
 import os
+import time
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -13,14 +14,26 @@ from market_calendar import get_market_cutoff, next_trading_dates
 OUTCOME_HORIZON_DAYS = 5
 TRANSACTION_COST = 0.002
 STOP_LOSS_PCT = 0.08
-# シグナル日から翌営業日約定、5営業日保有後の始値決済までを評価するため、余裕を持たせる。
-LOOKBACK_CALENDAR_DAYS = 45
+# 画面の90日集計(決済日基準)を現行定義の実績で埋められるよう、シグナル日を100日さかのぼる。
+LOOKBACK_CALENDAR_DAYS = 100
+# 1回の実行で確定させるシグナル日数。比較銘柄の価格補完でyfinanceの取得制限に当たらないよう、
+# 過去分の再計算は新しい日から数日ずつ進める(通常は1日1シグナル日が確定するだけ)。
+MAX_DATES_PER_RUN = 8
+# 一部の候補だけ確定済みのシグナル日を再試行する期間(評価期間終了からの暦日数)。
+RETRY_PARTIAL_DAYS = 14
+# 学習(add_excess_return_targets)と同じ外れ値の打ち切り幅。比較銘柄のリターンに適用する。
+RETURN_WINSOR_LIMIT = 0.30
+# 比較銘柄のうち価格を取得できた割合がこれ未満の日は確定しない。
+MIN_PEER_COVERAGE = 0.8
+YF_DOWNLOAD_CHUNK_SIZE = 40
 PAGE_SIZE = 1000
-# 取得ループの安全弁。45日窓の価格が3万行程度なので十分な余裕を持たせている。
+# 取得ループの安全弁。100日窓の価格でも2万行程度なので十分な余裕を持たせている。
 MAX_FETCH_PAGES = 200
 # 1回のupsertが大きくなりすぎないように分割して保存する。
 UPSERT_CHUNK_SIZE = 500
-EVALUATION_VERSION = "next_open_stop_excess_v1"
+# v2(2026-10-05): 比較銘柄をシグナル日の分析対象に固定し±30%で打ち切る。v1は分析対象に
+# 残り続けた急騰銘柄に比較銘柄が偏り、業種平均が水増しされていた。
+EVALUATION_VERSION = "next_open_stop_excess_v2"
 
 
 def _sector_from_joined_stock(value) -> str | None:
@@ -99,62 +112,101 @@ def _group_prices_by_ticker(price_rows: list[dict]) -> dict[str, list[dict]]:
     return prices_by_ticker
 
 
-def find_unsettled_candidates(
-    signal_rows: list[dict], price_rows: list[dict], settled_keys: set[tuple[str, str]], cutoff_date: date,
-) -> dict[str, str]:
-    """評価期間が終わったのにDBの価格だけでは確定できない候補を、銘柄→最古シグナル日で返す。
+def _clip(value: float) -> float:
+    return max(-RETURN_WINSOR_LIMIT, min(RETURN_WINSOR_LIMIT, float(value)))
 
-    AI買い候補の銘柄が翌日以降の日次分析対象(150銘柄)から外れると、pricesの保存が
-    止まり、実績台帳に永久に入らなかった(2026-09は買い候補の約3割)。
+
+def select_dates_to_settle(
+    signal_rows: list[dict], settled_keys: set[tuple[str, str]], cutoff_date: date,
+    max_dates: int = MAX_DATES_PER_RUN,
+) -> list[str]:
+    """評価期間が終わり、まだ現行定義で確定していないシグナル日を新しい順に返す。
+
+    取得できない候補(上場廃止等)が残る古い日で毎回の処理枠を占有しないよう、
+    一部確定済みの日はRETRY_PARTIAL_DAYS以内に評価期間が終わった日だけ再試行する。
     """
-    prices_by_ticker = _group_prices_by_ticker(price_rows)
-    since_by_ticker: dict[str, str] = {}
+    candidates_by_date: dict[str, set[str]] = defaultdict(set)
     for signal in signal_rows:
-        ticker, signal_date = signal.get("ticker"), signal.get("date")
-        if not ticker or not signal_date or (ticker, signal_date) in settled_keys:
-            continue
+        if signal.get("ticker") and signal.get("date"):
+            candidates_by_date[signal["date"]].add(signal["ticker"])
+    retry_since = (cutoff_date - timedelta(days=RETRY_PARTIAL_DAYS)).isoformat()
+    dates = []
+    for signal_date, tickers in candidates_by_date.items():
         window_end = next_trading_dates(signal_date, OUTCOME_HORIZON_DAYS + 1)[-1]
         if window_end > cutoff_date.isoformat():
             continue
-        if simulate_trade(prices_by_ticker.get(ticker, []), signal_date) is not None:
+        settled = {ticker for ticker in tickers if (ticker, signal_date) in settled_keys}
+        if settled == tickers or (settled and window_end < retry_since):
             continue
-        since_by_ticker[ticker] = min(since_by_ticker.get(ticker, signal_date), signal_date)
+        dates.append(signal_date)
+    return sorted(dates, reverse=True)[:max_dates]
+
+
+def tickers_missing_prices(
+    price_rows: list[dict], tickers_by_date: dict[str, set[str]]
+) -> dict[str, str]:
+    """DBの価格では評価期間が埋まらない銘柄を、銘柄→最古シグナル日で返す。
+
+    AI買い候補や比較銘柄が翌日以降の日次分析対象(150銘柄)から外れると、pricesの
+    保存が止まる。候補は実績台帳に入らず(2026-09は約3割)、比較銘柄は「分析対象に
+    残り続けた=急騰が続いた銘柄」に偏っていた。
+    """
+    prices_by_ticker = _group_prices_by_ticker(price_rows)
+    since_by_ticker: dict[str, str] = {}
+    for signal_date, tickers in tickers_by_date.items():
+        for ticker in tickers:
+            if trading_window(prices_by_ticker.get(ticker, []), signal_date) is None:
+                since_by_ticker[ticker] = min(since_by_ticker.get(ticker, signal_date), signal_date)
     return since_by_ticker
 
 
 def build_outcome_rows(
     signal_rows: list[dict], price_rows: list[dict], sector_by_ticker: dict[str, str | None],
-    topix_prices: list[dict], own_price_rows: list[dict] | None = None,
+    topix_prices: list[dict], universe_by_date: dict[str, set[str]],
+    min_peer_coverage: float = MIN_PEER_COVERAGE,
 ) -> list[dict]:
     """候補と価格履歴から、学習と同一条件の超過リターン実績を作る(外部I/Oなし)。
 
-    own_price_rowsは分析対象から外れた候補の補完価格。候補自身の約定計算だけに使い、
-    業種ベンチマークの比較銘柄には加えない(既存実績のベンチマーク構成を変えないため)。
+    比較銘柄はシグナル日の分析対象(universe_by_date)に固定する。以前はDBに評価期間の
+    価格がそろった全銘柄を比較対象にしており、分析対象に残り続けた急騰銘柄に偏って
+    業種平均が水増しされていた(2026-08〜09の平均ベンチマーク+2.09%、固定後+0.38%)。
+    学習時と同じく比較銘柄のリターンは±30%で打ち切る。候補自身のリターンは実際の値を記録する。
+    価格を取得できた比較銘柄がmin_peer_coverage未満の日は、偏った平均で確定させず次回へ持ち越す。
     """
     prices_by_ticker = _group_prices_by_ticker(price_rows)
-    own_prices_by_ticker = _group_prices_by_ticker(own_price_rows or [])
 
     simulations: dict[tuple[str, str], dict | None] = {}
+
+    def simulated(ticker: str, signal_date: str) -> dict | None:
+        key = (ticker, signal_date)
+        if key not in simulations:
+            simulations[key] = simulate_trade(prices_by_ticker.get(ticker, []), signal_date)
+        return simulations[key]
+
+    coverage_ok: dict[str, bool] = {}
     outcomes = []
     for signal in signal_rows:
         signal_date = signal.get("date")
         ticker = signal.get("ticker")
         if not ticker or not signal_date:
             continue
-        own = simulate_trade(prices_by_ticker.get(ticker, []), signal_date)
-        if own is None and ticker in own_prices_by_ticker:
-            own = simulate_trade(own_prices_by_ticker[ticker], signal_date)
+        own = simulated(ticker, signal_date)
         if own is None:
             continue
 
+        universe = universe_by_date.get(signal_date, set()) | {ticker}
         returns_by_ticker = {}
-        for peer_ticker, prices in prices_by_ticker.items():
-            key = (peer_ticker, signal_date)
-            if key not in simulations:
-                simulations[key] = simulate_trade(prices, signal_date)
-            simulated = simulations[key]
-            if simulated is not None:
-                returns_by_ticker[peer_ticker] = float(simulated["gross_return"])
+        for peer_ticker in universe:
+            result = simulated(peer_ticker, signal_date)
+            if result is not None:
+                returns_by_ticker[peer_ticker] = _clip(result["gross_return"])
+        if signal_date not in coverage_ok:
+            coverage = len(returns_by_ticker) / len(universe)
+            coverage_ok[signal_date] = coverage >= min_peer_coverage
+            if not coverage_ok[signal_date]:
+                print(f"{signal_date}: 比較銘柄の価格取得率{coverage:.0%}のため確定を次回へ持ち越します")
+        if not coverage_ok[signal_date]:
+            continue
 
         sector = sector_by_ticker.get(ticker)
         sector_returns = [
@@ -166,7 +218,9 @@ def build_outcome_rows(
             benchmark_return = sum(sector_returns) / len(sector_returns)
         else:
             benchmark_return = topix_return(topix_prices, signal_date)
-            if benchmark_return is None:
+            if benchmark_return is not None:
+                benchmark_return = _clip(benchmark_return)
+            else:
                 market_returns = [value for peer_ticker, value in returns_by_ticker.items() if peer_ticker != ticker]
                 if not market_returns:
                     continue
@@ -262,35 +316,52 @@ def fetch_topix_prices(since: str, today: date) -> list[dict]:
     ]
 
 
-def fetch_candidate_prices(since_by_ticker: dict[str, str], cutoff_date: date) -> list[dict]:
-    """分析対象から外れた候補の始値・安値を無料のyfinanceから取得する(DBには保存しない)。
+def fetch_missing_prices(since_by_ticker: dict[str, str], cutoff_date: date) -> list[dict]:
+    """分析対象から外れた候補・比較銘柄の始値・安値を無料のyfinanceから取得する(DBには保存しない)。
 
-    日次取得と同じ既定の調整済み価格・桁ずれ補修を使い、未確定のcutoff_date後は除外する。
+    日次取得と同じ調整済み価格・桁ずれ補修を使い、未確定のcutoff_date後は除外する。
     """
     from train_model import repair_price_glitches
 
+    tickers = sorted(since_by_ticker)
+    end = (cutoff_date + timedelta(days=1)).isoformat()
     rows = []
-    for ticker, since in sorted(since_by_ticker.items()):
-        try:
-            history = yf.Ticker(ticker).history(
-                start=since, end=(cutoff_date + timedelta(days=1)).isoformat()
-            )
-        except Exception as exc:
-            print(f"候補の価格補完に失敗 {ticker}: {exc}")
-            continue
-        if history.empty:
-            continue
-        history = repair_price_glitches(history.reset_index())
-        for _, row in history.iterrows():
-            trading_date = pd.to_datetime(row["Date"]).date()
-            if trading_date > cutoff_date:
-                continue
-            rows.append({
-                "ticker": ticker,
-                "date": trading_date.isoformat(),
-                "open": None if pd.isna(row["Open"]) else float(row["Open"]),
-                "low": None if pd.isna(row["Low"]) else float(row["Low"]),
-            })
+    for start in range(0, len(tickers), YF_DOWNLOAD_CHUNK_SIZE):
+        chunk = tickers[start : start + YF_DOWNLOAD_CHUNK_SIZE]
+        since = min(since_by_ticker[ticker] for ticker in chunk)
+        for attempt in range(2):
+            try:
+                data = yf.download(
+                    chunk, start=since, end=end, group_by="ticker", auto_adjust=True,
+                    progress=False, threads=True,
+                )
+            except Exception as exc:
+                print(f"価格補完に失敗 ({chunk[0]}〜): {exc}")
+                data = pd.DataFrame()
+            fetched = 0
+            for ticker in chunk:
+                try:
+                    history = data[ticker].dropna(subset=["Open"])
+                except (KeyError, TypeError):
+                    continue
+                if history.empty:
+                    continue
+                fetched += 1
+                history = repair_price_glitches(history.rename_axis("Date").reset_index())
+                for _, row in history.iterrows():
+                    trading_date = pd.to_datetime(row["Date"]).date()
+                    if trading_date > cutoff_date:
+                        continue
+                    rows.append({
+                        "ticker": ticker,
+                        "date": trading_date.isoformat(),
+                        "open": None if pd.isna(row["Open"]) else float(row["Open"]),
+                        "low": None if pd.isna(row["Low"]) else float(row["Low"]),
+                    })
+            if fetched or attempt:
+                break
+            time.sleep(30)  # 取得制限時は少し待って1回だけ再試行する
+        time.sleep(2)
     return rows
 
 
@@ -331,7 +402,6 @@ def main():
     sector_by_ticker = {row["ticker"]: row.get("sector") for row in stock_rows}
     for signal in signal_rows:
         sector_by_ticker.setdefault(signal["ticker"], _sector_from_joined_stock(signal.get("stocks")))
-    price_rows = fetch_all_prices(sb, since, today.isoformat())
     settled_rows = fetch_all_rows(
         lambda: (
             sb.table("signal_outcomes")
@@ -344,14 +414,39 @@ def main():
         "確定済み実績",
     )
     cutoff_date, _ = get_market_cutoff(datetime.now(ZoneInfo("Asia/Tokyo")))
-    unsettled = find_unsettled_candidates(
-        signal_rows, price_rows, {(row["ticker"], row["signal_date"]) for row in settled_rows}, cutoff_date
+    dates = select_dates_to_settle(
+        signal_rows, {(row["ticker"], row["signal_date"]) for row in settled_rows}, cutoff_date
     )
-    own_price_rows = fetch_candidate_prices(unsettled, cutoff_date) if unsettled else []
-    if unsettled:
-        print(f"分析対象外の候補の価格を補完: {len(unsettled)}銘柄")
+    if not dates:
+        print("翌営業日始値から5営業日後始値までの評価期間が未確定のため、本番実績の追加はありません。")
+        return
+    print(f"確定対象のシグナル日: {', '.join(sorted(dates))}")
+    target_signals = [signal for signal in signal_rows if signal["date"] in dates]
+
+    # 比較銘柄はシグナル日に分析した銘柄(=その日のsignals)に固定する。
+    universe_rows = fetch_all_rows(
+        lambda: (
+            sb.table("signals").select("ticker, date").in_("date", dates)
+            .order("date", desc=False).order("ticker", desc=False)
+        ),
+        "分析対象",
+    )
+    universe_by_date: dict[str, set[str]] = defaultdict(set)
+    for row in universe_rows:
+        universe_by_date[row["date"]].add(row["ticker"])
+    for signal in target_signals:
+        universe_by_date[signal["date"]].add(signal["ticker"])
+
+    price_rows = fetch_all_prices(sb, min(dates), today.isoformat())
+    missing = tickers_missing_prices(price_rows, universe_by_date)
+    if missing:
+        print(f"分析対象から外れた銘柄の価格を補完: {len(missing)}銘柄")
+        supplement = fetch_missing_prices(missing, cutoff_date)
+        supplemented = {row["ticker"] for row in supplement}
+        price_rows = [row for row in price_rows if row["ticker"] not in supplemented] + supplement
     outcome_rows = build_outcome_rows(
-        signal_rows, price_rows, sector_by_ticker, fetch_topix_prices(since, today), own_price_rows
+        target_signals, price_rows, sector_by_ticker, fetch_topix_prices(min(dates), today),
+        universe_by_date,
     )
     if not outcome_rows:
         print("翌営業日始値から5営業日後始値までの評価期間が未確定のため、本番実績の追加はありません。")

@@ -1,4 +1,4 @@
-export const EVALUATION_VERSION = "next_open_stop_excess_v1";
+export const EVALUATION_VERSION = "next_open_stop_excess_v2";
 export type Outcome = {
   ticker: string;
   signal_date: string;

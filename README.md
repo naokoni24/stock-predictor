@@ -61,7 +61,7 @@ SUPABASE_SERVICE_KEY=...
 - `scripts/fetch_news.py`: Google News RSSからニュース取得・簡易センチメント分析。
 - `scripts/train_model.py`: MLモデルの月次再学習(RandomForest / GradientBoosting / LightGBMのVotingClassifier)。
 - `scripts/backtest_ml.py`: 月次walk-forward方式のバックテスト。
-- `scripts/evaluate_signal_outcomes.py`: AI買い候補を翌営業日始値で約定し、8%損切りまたは5営業日後始値で決済して、業種/TOPIX超過リターン（往復コスト0.2%控除後）を本番実績として保存。
+- `scripts/evaluate_signal_outcomes.py`: AI買い候補を翌営業日始値で約定し、8%損切りまたは5営業日後始値で決済して、業種/TOPIX超過リターン（往復コスト0.2%控除後）を本番実績として保存。業種平均はシグナル日の分析対象銘柄で計算し（±30%打ち切り）、分析対象から外れた銘柄の価格はyfinanceで補完する（評価定義 `next_open_stop_excess_v2`）。
 - `scripts/apply_retention.py`: prices/signals/newsの保持期間ルールに基づく古いデータの削除。
 
 ### macOSでLightGBMがロードできない場合

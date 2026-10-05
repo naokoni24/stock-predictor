@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 
 from market_calendar import get_market_cutoff, is_jpx_trading_day, next_trading_dates
-from evaluate_signal_outcomes import build_outcome_rows, find_unsettled_candidates, simulate_trade, topix_return
+from evaluate_signal_outcomes import build_outcome_rows, select_dates_to_settle, simulate_trade, tickers_missing_prices, topix_return
 from fetch_and_signal import limit_ml_buy_candidates, make_signal, repair_inference_universe, upsert_in_chunks, get_watchlist_tickers, select_daily_tickers, select_repair_tickers
 from train_model import add_breadth_features, compute_barrier_outcome
 
@@ -73,24 +73,53 @@ class OutcomeTests(unittest.TestCase):
         self.prices[1]["low"] = float("inf")
         self.assertIsNone(simulate_trade(self.prices, self.signal_date))
 
-    def test_candidate_dropped_from_universe_is_supplemented(self):
+    def peer_prices(self, ticker, growth):
+        """シグナル翌営業日始値100から5営業日後始値100*(1+growth)まで直線的に動く価格。"""
+        return [
+            {"ticker": ticker, "date": r["date"], "open": 100 * (1 + growth * i / 5), "low": 99 * (1 + growth * i / 5)}
+            for i, r in enumerate(self.prices)
+        ]
+
+    def test_dates_to_settle(self):
+        signals = [{"ticker": "9999.T", "date": "2026-09-25"}, {"ticker": "8888.T", "date": "2026-09-25"},
+                   {"ticker": "9999.T", "date": "2026-09-01"}, {"ticker": "9999.T", "date": "2026-09-29"}]
+        cutoff = date(2026, 10, 5)
+        # 評価期間(9/29シグナルは10/6始値で決済)が終わっていない日は対象外。新しい順に返す。
+        self.assertEqual(select_dates_to_settle(signals, set(), cutoff), ["2026-09-25", "2026-09-01"])
+        self.assertEqual(select_dates_to_settle(signals, set(), cutoff, max_dates=1), ["2026-09-25"])
+        # 一部確定済みの日は、評価期間終了から日が浅い間だけ再試行する。
+        partial = {("9999.T", "2026-09-25")}
+        self.assertEqual(select_dates_to_settle(signals, partial, cutoff), ["2026-09-25", "2026-09-01"])
+        self.assertEqual(select_dates_to_settle(signals, partial, date(2026, 11, 5)), ["2026-09-29", "2026-09-01"])
+        settled = {("9999.T", "2026-09-25"), ("8888.T", "2026-09-25"), ("9999.T", "2026-09-01")}
+        self.assertEqual(select_dates_to_settle(signals, settled, cutoff), [])
+
+    def test_missing_prices_are_detected_per_signal_date(self):
+        rows = self.peer_prices("1111.T", 0.01) + self.peer_prices("2222.T", 0.01)[:3]
+        self.assertEqual(
+            tickers_missing_prices(rows, {self.signal_date: {"1111.T", "2222.T", "3333.T"}}),
+            {"2222.T": self.signal_date, "3333.T": self.signal_date},
+        )
+
+    def test_benchmark_uses_signal_date_universe_and_clips_outliers(self):
+        sectors = {t: "電気機器" for t in ["9999.T", "1111.T", "2222.T", "7777.T"]}
         signals = [{"ticker": "9999.T", "date": self.signal_date}]
-        peers = [dict(r, ticker=t) for t in ["1111.T", "2222.T"] for r in self.prices]
-        dropped = [dict(r, ticker="9999.T") for r in self.prices[:1]]
-        # 評価期間が終わり、DBの価格だけでは確定できない候補だけを補完対象にする。
-        self.assertEqual(find_unsettled_candidates(signals, peers + dropped, set(), date(2026, 10, 5)), {"9999.T": self.signal_date})
-        self.assertEqual(find_unsettled_candidates(signals, peers + dropped, set(), date(2026, 10, 2)), {})
-        self.assertEqual(find_unsettled_candidates(signals, peers + dropped, {("9999.T", self.signal_date)}, date(2026, 10, 5)), {})
-        sectors = {"9999.T": "電気機器", "1111.T": "電気機器", "2222.T": "電気機器"}
-        self.assertEqual(build_outcome_rows(signals, peers + dropped, sectors, []), [])
-        own = [dict(r, ticker="9999.T", open=200 + 10 * i, low=199 + 10 * i) for i, r in enumerate(self.prices)]
-        rows = build_outcome_rows(signals, peers + dropped, sectors, [], own)
+        prices = (self.peer_prices("9999.T", 0.05) + self.peer_prices("1111.T", 0.01)
+                  + self.peer_prices("2222.T", 0.9) + self.peer_prices("7777.T", 0.5))
+        # 7777.Tはシグナル日の分析対象外。後から分析対象に入った急騰銘柄を比較に混ぜない。
+        rows = build_outcome_rows(signals, prices, sectors, [], {self.signal_date: {"9999.T", "1111.T", "2222.T"}})
         self.assertEqual(len(rows), 1)
-        self.assertAlmostEqual(rows[0]["gross_return"], 0.25)
-        # 補完価格は候補自身の計算だけに使い、他の候補のベンチマーク比較銘柄には加えない。
-        self.assertAlmostEqual(rows[0]["benchmark_return"], 0.05)
-        peer_rows = build_outcome_rows([{"ticker": "1111.T", "date": self.signal_date}], peers, sectors, [], own)
-        self.assertAlmostEqual(peer_rows[0]["benchmark_return"], 0.05)
+        self.assertAlmostEqual(rows[0]["gross_return"], 0.05)
+        # 2222.Tの+90%は学習と同じく+30%で打ち切る: (0.01 + 0.30) / 2
+        self.assertAlmostEqual(rows[0]["benchmark_return"], 0.155)
+
+    def test_low_peer_coverage_postpones_settlement(self):
+        sectors = {"9999.T": "電気機器", "1111.T": "電気機器", "2222.T": "電気機器"}
+        signals = [{"ticker": "9999.T", "date": self.signal_date}]
+        prices = self.peer_prices("9999.T", 0.05) + self.peer_prices("1111.T", 0.01) + self.peer_prices("2222.T", 0.02)
+        universe = {self.signal_date: {"9999.T", "1111.T", "2222.T"} | {f"{i}.T" for i in range(1000, 1003)}}
+        self.assertEqual(build_outcome_rows(signals, prices, sectors, [], universe), [])
+        self.assertEqual(len(build_outcome_rows(signals, prices, sectors, [], universe, min_peer_coverage=0.5)), 1)
 
 
 class SignalTests(unittest.TestCase):
