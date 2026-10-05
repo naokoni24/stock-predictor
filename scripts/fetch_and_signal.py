@@ -62,6 +62,16 @@ MAX_HOLDINGS_TICKERS = 50
 # 消費していた(2026-08〜09に28銘柄・80回)。
 TSE_TICKER_PATTERN = re.compile(r"[0-9][0-9A-Z]{3}\.T")
 
+# pricesへは通常、直近PRICE_SAVE_ROWS行だけを上書き保存する。
+PRICE_SAVE_ROWS = 30
+# yfinanceは株式分割があると過去の価格をすべて調整し直すが、直近30行だけの上書きでは
+# それより古い行が分割前の価格のまま残り、約30営業日前に段差ができていた
+# (2026-09-29の8035.T 1:5分割で8/13→8/14に59,470円→11,423円。銘柄詳細のチャート・
+# 的中率、AI実績の評価期間が崩れる)。直近SPLIT_RESAVE_LOOKBACK_DAYS日以内に分割が
+# あった銘柄は、保持期間(apply_retention.pyの1年)内の価格をすべて保存し直す。
+SPLIT_RESAVE_LOOKBACK_DAYS = 180
+PRICE_HISTORY_KEEP_DAYS = 360
+
 # prices/signalsのupsertをまとめて送る際の1リクエストあたりの最大行数
 UPSERT_CHUNK_SIZE = 500
 
@@ -80,6 +90,16 @@ CLOSE_VALIDATION_TICKERS = ("7203.T", "6758.T", "9984.T", "8306.T")
 # signalsのupsertだけが失敗してジョブ全体がfailした。一時的な失敗は間隔を空けて再試行する。
 UPSERT_MAX_ATTEMPTS = 3
 UPSERT_RETRY_WAIT_SEC = 10
+
+
+def price_rows_to_save(hist: pd.DataFrame, cutoff_date, ticker: str = "") -> pd.DataFrame:
+    """pricesへ保存する行を返す。直近に株式分割があれば保持期間内の全行を返す。"""
+    if "Stock Splits" in hist.columns:
+        split_dates = hist.loc[hist["Stock Splits"].fillna(0) != 0, "date"]
+        if any(d >= cutoff_date - timedelta(days=SPLIT_RESAVE_LOOKBACK_DAYS) for d in split_dates):
+            print(f"{ticker}: 株式分割を検出したため直近{PRICE_HISTORY_KEEP_DAYS}日の価格を保存し直します")
+            return hist[hist["date"] >= cutoff_date - timedelta(days=PRICE_HISTORY_KEEP_DAYS)]
+    return hist.tail(PRICE_SAVE_ROWS)
 
 
 def upsert_in_chunks(table, rows, *, on_conflict=None):
@@ -1033,7 +1053,7 @@ def main():
                 "close": None if pd.isna(r["Close"]) else float(r["Close"]),
                 "volume": None if pd.isna(r["Volume"]) else int(r["Volume"]),
             }
-            for _, r in hist.tail(30).iterrows()
+            for _, r in price_rows_to_save(hist, cutoff_date, ticker).iterrows()
         ]
         if ticker in all_tickers:
             all_price_rows.extend(price_rows)

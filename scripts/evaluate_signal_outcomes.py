@@ -26,6 +26,9 @@ RETURN_WINSOR_LIMIT = 0.30
 # 比較銘柄のうち価格を取得できた割合がこれ未満の日は確定しない。
 MIN_PEER_COVERAGE = 0.8
 YF_DOWNLOAD_CHUNK_SIZE = 40
+# 前日始値比がこの範囲外なら株式分割の未反映とみなす(東証の値幅制限では通常起きない)。
+ADJUSTMENT_STEP_MIN_RATIO = 0.6
+ADJUSTMENT_STEP_MAX_RATIO = 1.7
 PAGE_SIZE = 1000
 # 取得ループの安全弁。100日窓の価格でも2万行程度なので十分な余裕を持たせている。
 MAX_FETCH_PAGES = 200
@@ -142,20 +145,36 @@ def select_dates_to_settle(
     return sorted(dates, reverse=True)[:max_dates]
 
 
+def has_adjustment_step(window: list[dict]) -> bool:
+    """評価期間内に株式分割の未反映とみられる段差(前日始値比)があるかを返す。
+
+    日次取得はpricesの直近30行だけを上書きするため、分割後もそれより古い行は分割前の
+    価格のまま残り、約30営業日前に段差ができる(2026-09-29の8035.Tの1:5分割で8/13→8/14に
+    59,470円→11,423円)。東証の値幅制限内の値動きでは起きない比率を段差とみなす。
+    """
+    for previous, current in zip(window, window[1:]):
+        ratio = float(current["open"]) / float(previous["open"])
+        if ratio < ADJUSTMENT_STEP_MIN_RATIO or ratio > ADJUSTMENT_STEP_MAX_RATIO:
+            return True
+    return False
+
+
 def tickers_missing_prices(
     price_rows: list[dict], tickers_by_date: dict[str, set[str]]
 ) -> dict[str, str]:
-    """DBの価格では評価期間が埋まらない銘柄を、銘柄→最古シグナル日で返す。
+    """DBの価格では評価期間を正しく計算できない銘柄を、銘柄→最古シグナル日で返す。
 
     AI買い候補や比較銘柄が翌日以降の日次分析対象(150銘柄)から外れると、pricesの
     保存が止まる。候補は実績台帳に入らず(2026-09は約3割)、比較銘柄は「分析対象に
-    残り続けた=急騰が続いた銘柄」に偏っていた。
+    残り続けた=急騰が続いた銘柄」に偏っていた。株式分割の未反映で段差がある期間も、
+    yfinanceの一貫した調整済み価格で取り直す。
     """
     prices_by_ticker = _group_prices_by_ticker(price_rows)
     since_by_ticker: dict[str, str] = {}
     for signal_date, tickers in tickers_by_date.items():
         for ticker in tickers:
-            if trading_window(prices_by_ticker.get(ticker, []), signal_date) is None:
+            window = trading_window(prices_by_ticker.get(ticker, []), signal_date)
+            if window is None or has_adjustment_step(window):
                 since_by_ticker[ticker] = min(since_by_ticker.get(ticker, signal_date), signal_date)
     return since_by_ticker
 

@@ -8,7 +8,7 @@ import pandas as pd
 
 from market_calendar import get_market_cutoff, is_jpx_trading_day, next_trading_dates
 from evaluate_signal_outcomes import build_outcome_rows, select_dates_to_settle, simulate_trade, tickers_missing_prices, topix_return
-from fetch_and_signal import limit_ml_buy_candidates, make_signal, repair_inference_universe, upsert_in_chunks, get_holdings_tickers, get_screener_tickers, get_watchlist_tickers, select_daily_tickers, select_repair_tickers
+from fetch_and_signal import limit_ml_buy_candidates, price_rows_to_save, make_signal, repair_inference_universe, upsert_in_chunks, get_holdings_tickers, get_screener_tickers, get_watchlist_tickers, select_daily_tickers, select_repair_tickers
 from train_model import add_breadth_features, bundle_out_of_sample_start, compute_barrier_outcome, should_promote_candidate
 
 
@@ -101,6 +101,17 @@ class OutcomeTests(unittest.TestCase):
             {"2222.T": self.signal_date, "3333.T": self.signal_date},
         )
 
+    def test_split_step_in_db_window_is_refetched(self):
+        normal = self.peer_prices("1111.T", 0.05)
+        split = [dict(r) for r in normal]
+        for r in split[:2]:
+            r.update(open=r["open"] * 5, low=r["low"] * 5)  # 分割前の未調整価格が残った行
+        self.assertEqual(
+            tickers_missing_prices(normal + [dict(r, ticker="2222.T") for r in split],
+                                   {self.signal_date: {"1111.T", "2222.T"}}),
+            {"2222.T": self.signal_date},
+        )
+
     def test_benchmark_uses_signal_date_universe_and_clips_outliers(self):
         sectors = {t: "電気機器" for t in ["9999.T", "1111.T", "2222.T", "7777.T"]}
         signals = [{"ticker": "9999.T", "date": self.signal_date}]
@@ -132,6 +143,19 @@ class SignalTests(unittest.TestCase):
         result = get_watchlist_tickers(sb)
         self.assertEqual(len(result), 30)
         self.assertEqual(result["7203.T"], "トヨタ")
+
+    def test_recent_split_resaves_retained_history(self):
+        days = pd.bdate_range("2025-09-01", "2026-10-02").date
+        hist = pd.DataFrame({"date": days, "Close": 100.0, "Stock Splits": 0.0})
+        cutoff = date(2026, 10, 2)
+        self.assertEqual(len(price_rows_to_save(hist, cutoff)), 30)
+        hist.loc[hist["date"] == date(2026, 9, 29), "Stock Splits"] = 5.0
+        saved = price_rows_to_save(hist, cutoff)
+        self.assertEqual(saved["date"].min(), date(2025, 10, 7))
+        old_split = hist.assign(**{"Stock Splits": 0.0})
+        old_split.loc[old_split["date"] == date(2026, 1, 5), "Stock Splits"] = 2.0
+        self.assertEqual(len(price_rows_to_save(old_split, cutoff)), 30)
+        self.assertEqual(len(price_rows_to_save(hist.drop(columns=["Stock Splits"]), cutoff)), 30)
 
     def test_holdings_are_capped_and_validated(self):
         sb = MagicMock()
