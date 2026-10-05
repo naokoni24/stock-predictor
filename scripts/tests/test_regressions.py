@@ -8,7 +8,7 @@ import pandas as pd
 
 from market_calendar import get_market_cutoff, is_jpx_trading_day, next_trading_dates
 from evaluate_signal_outcomes import build_outcome_rows, select_dates_to_settle, simulate_trade, tickers_missing_prices, topix_return
-from fetch_and_signal import limit_ml_buy_candidates, make_signal, repair_inference_universe, upsert_in_chunks, get_screener_tickers, get_watchlist_tickers, select_daily_tickers, select_repair_tickers
+from fetch_and_signal import limit_ml_buy_candidates, make_signal, repair_inference_universe, upsert_in_chunks, get_holdings_tickers, get_screener_tickers, get_watchlist_tickers, select_daily_tickers, select_repair_tickers
 from train_model import add_breadth_features, bundle_out_of_sample_start, compute_barrier_outcome, should_promote_candidate
 
 
@@ -132,6 +132,16 @@ class SignalTests(unittest.TestCase):
         result = get_watchlist_tickers(sb)
         self.assertEqual(len(result), 30)
         self.assertEqual(result["7203.T"], "トヨタ")
+
+    def test_holdings_are_capped_and_validated(self):
+        sb = MagicMock()
+        sb.table.return_value.select.return_value.order.return_value.limit.return_value.execute.return_value.data = [
+            {"ticker": "7203.T", "stocks": {"name": "トヨタ"}}, {"ticker": "7203.T", "stocks": None},
+            {"ticker": "BAD", "stocks": None}, {"ticker": "5802@F.T", "stocks": None},
+        ] + [{"ticker": f"{i}.T", "stocks": None} for i in range(1000, 1100)]
+        result = get_holdings_tickers(sb)
+        self.assertEqual(len(result), 50)
+        self.assertEqual(list(result)[:2], ["7203.T", "1000.T"])
 
     def test_watchlists_missing_sql_does_not_stop_daily_batch(self):
         sb = MagicMock()

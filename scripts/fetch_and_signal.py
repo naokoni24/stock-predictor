@@ -53,6 +53,14 @@ INFERENCE_HISTORY_PERIOD = "2y"
 SCREENER_SIZE = 50
 PREVIOUS_SIGNAL_LIMIT = 50
 MAX_WATCHLIST_TICKERS = 30
+# 保有株は全ユーザー分を日次分析の最優先枠に入れる。Supabaseの新規登録が開いている間は
+# 第三者が大量の保有株で150銘柄の枠を占有できるため、登録順(id順)に上限を設ける。
+MAX_HOLDINGS_TICKERS = 50
+
+# 東証の4桁コード(英字入りの新コードを含む)。Yahooのスクリーナーは福証・札証の重複上場を
+# "5802@F.T"/"7011@S.T"のように別銘柄として返し、シグナルを計算できないまま日次分析枠を
+# 消費していた(2026-08〜09に28銘柄・80回)。
+TSE_TICKER_PATTERN = re.compile(r"[0-9][0-9A-Z]{3}\.T")
 
 # prices/signalsのupsertをまとめて送る際の1リクエストあたりの最大行数
 UPSERT_CHUNK_SIZE = 500
@@ -545,16 +553,19 @@ def upsert_stock_master(sb, all_tickers: dict[str, str], jp_sectors: dict[str, s
 def get_holdings_tickers(sb) -> dict[str, str]:
     """保有株は必ず日次分析に含める"""
     try:
-        res = sb.table("holdings").select("ticker, stocks(name)").execute()
+        res = sb.table("holdings").select("ticker, stocks(name)").order("id").limit(1000).execute()
         result = {}
         for row in res.data or []:
             ticker = row.get("ticker")
-            if not ticker:
+            if not ticker or ticker in result or not TSE_TICKER_PATTERN.fullmatch(ticker):
                 continue
             stock = row.get("stocks")
             if isinstance(stock, list):
                 stock = stock[0] if stock else None
             result[ticker] = (stock or {}).get("name") or ticker
+            if len(result) >= MAX_HOLDINGS_TICKERS:
+                print(f"::warning::保有株の銘柄数が上限{MAX_HOLDINGS_TICKERS}に達したため、以降は日次分析に含めません")
+                break
         return result
     except Exception as e:
         print(f"failed to load holdings tickers: {e}")
@@ -570,7 +581,7 @@ def get_watchlist_tickers(sb) -> dict[str, str]:
         result = {}
         for row in rows:
             ticker = row.get("ticker")
-            if not ticker or ticker in result:
+            if not ticker or ticker in result or not TSE_TICKER_PATTERN.fullmatch(ticker):
                 continue
             stock = row.get("stocks")
             if isinstance(stock, list):
@@ -751,12 +762,6 @@ def repair_inference_universe(sb, repair_tickers: dict[str, str], jp_names: dict
         ticker = row["ticker"]
         universe.setdefault(ticker, jp_names.get(ticker) or stock.get("name") or ticker)
     return universe
-
-
-# 東証の4桁コード(英字入りの新コードを含む)。Yahooのスクリーナーは福証・札証の重複上場を
-# "5802@F.T"/"7011@S.T"のように別銘柄として返し、シグナルを計算できないまま日次分析枠を
-# 消費していた(2026-08〜09に28銘柄・80回)。
-TSE_TICKER_PATTERN = re.compile(r"[0-9][0-9A-Z]{3}\.T")
 
 
 def get_screener_tickers(size: int = 50) -> dict[str, str]:

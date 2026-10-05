@@ -24,7 +24,11 @@ export default function DismissibleAlert({
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    const storedDate = localStorage.getItem(`${STORAGE_PREFIX}${id}`);
+    // プライベートブラウズ等でlocalStorageが使えない場合も、アラート表示自体は続ける
+    let storedDate: string | null = null;
+    try {
+      storedDate = localStorage.getItem(`${STORAGE_PREFIX}${id}`);
+    } catch {}
     if (storedDate === todayJst() && ref.current) {
       ref.current.style.display = "none";
     }
@@ -39,7 +43,9 @@ export default function DismissibleAlert({
         type="button"
         aria-label="閉じる"
         onClick={() => {
-          localStorage.setItem(`${STORAGE_PREFIX}${id}`, todayJst());
+          try {
+            localStorage.setItem(`${STORAGE_PREFIX}${id}`, todayJst());
+          } catch {}
           setClosed(true);
         }}
         className="shrink-0 rounded-md p-1 hover:bg-black/5 dark:hover:bg-white/10"

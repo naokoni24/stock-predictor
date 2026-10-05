@@ -32,6 +32,10 @@ concurrency:
   group: daily-signals
   cancel-in-progress: false
 
+# リポジトリへの書き込みは不要(DBへの保存はSupabaseのシークレットで行う)。既定の書き込み権限を外す。
+permissions:
+  contents: read
+
 jobs:
   fetch-and-signal:
     runs-on: ubuntu-latest
